@@ -7,16 +7,16 @@ defmodule Serialize.BitReader do
   with the window priced inside the binary: bytes past the end of the data
   are never loaded and never interpreted, so callers owe no allocation
   slack beyond the data itself (STANDARD.md "Past-end memory is an
-  implementation contract"). Reads share the underlying binary; nothing is
-  copied.
+  implementation contract"). The window is 40 bits — enough for a 7-bit
+  offset plus a 32-bit field, and small enough that the decoded value never
+  leaves the BEAM's small-integer range. Reads share the underlying binary;
+  nothing is copied.
 
   The reader trusts its callers to check `would_read_past_end?/2` before
   reading, exactly as the reference's streams do.
   """
 
   import Bitwise
-
-  alias Serialize.Bits
 
   defstruct data: <<>>, num_bits: 0, bits_read: 0
 
@@ -50,14 +50,14 @@ defmodule Serialize.BitReader do
 
     window =
       case reader.data do
-        <<_::binary-size(^byte_index), word::little-64, _::binary>> ->
+        <<_::binary-size(^byte_index), word::little-40, _::binary>> ->
           word
 
         <<_::binary-size(^byte_index), rest::binary>> ->
           :binary.decode_unsigned(rest, :little)
       end
 
-    value = window >>> bit_offset &&& Bits.mask(bits)
+    value = window >>> bit_offset &&& (1 <<< bits) - 1
     {value, %{reader | bits_read: reader.bits_read + bits}}
   end
 
