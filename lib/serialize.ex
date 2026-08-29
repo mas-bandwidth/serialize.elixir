@@ -56,9 +56,19 @@ defmodule Serialize do
   high remainder as a second group (STANDARD.md "bits").
   """
   @spec serialize_bits(stream, non_neg_integer, 1..64) :: result(non_neg_integer)
-  def serialize_bits(stream, value, bits)
+  def serialize_bits(%WriteStream{} = stream, value, bits)
       when is_integer(bits) and bits >= 1 and bits <= 32 do
-    smod(stream).serialize_bits(stream, value, bits)
+    WriteStream.serialize_bits(stream, value, bits)
+  end
+
+  def serialize_bits(%ReadStream{} = stream, value, bits)
+      when is_integer(bits) and bits >= 1 and bits <= 32 do
+    ReadStream.serialize_bits(stream, value, bits)
+  end
+
+  def serialize_bits(%MeasureStream{} = stream, value, bits)
+      when is_integer(bits) and bits >= 1 and bits <= 32 do
+    MeasureStream.serialize_bits(stream, value, bits)
   end
 
   def serialize_bits(stream, value, bits)
@@ -154,10 +164,22 @@ defmodule Serialize do
   bits. The reader rejects a decoded offset outside the range.
   """
   @spec serialize_int(stream, integer, integer, integer) :: result(integer)
-  def serialize_int(stream, value, min, max)
+  def serialize_int(%WriteStream{} = stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int32_min and max <= @int32_max and
              min <= max do
-    smod(stream).serialize_integer(stream, value, min, max)
+    WriteStream.serialize_integer(stream, value, min, max)
+  end
+
+  def serialize_int(%ReadStream{} = stream, value, min, max)
+      when is_integer(min) and is_integer(max) and min >= @int32_min and max <= @int32_max and
+             min <= max do
+    ReadStream.serialize_integer(stream, value, min, max)
+  end
+
+  def serialize_int(%MeasureStream{} = stream, value, min, max)
+      when is_integer(min) and is_integer(max) and min >= @int32_min and max <= @int32_max and
+             min <= max do
+    MeasureStream.serialize_integer(stream, value, min, max)
   end
 
   @doc """
@@ -487,7 +509,9 @@ defmodule Serialize do
   reader verifies the padding is zero.
   """
   @spec serialize_align(stream) :: {:ok, stream} | {:error, stream}
-  def serialize_align(stream), do: smod(stream).serialize_align(stream)
+  def serialize_align(%WriteStream{} = stream), do: WriteStream.serialize_align(stream)
+  def serialize_align(%ReadStream{} = stream), do: ReadStream.serialize_align(stream)
+  def serialize_align(%MeasureStream{} = stream), do: MeasureStream.serialize_align(stream)
 
   @doc """
   Serializes `count` raw bytes, aligning first — the alignment is part of
@@ -496,8 +520,16 @@ defmodule Serialize do
   come back as a sub-binary of the stream's data.
   """
   @spec serialize_bytes(stream, binary | nil, non_neg_integer) :: result(binary)
-  def serialize_bytes(stream, data, count) when is_integer(count) do
-    smod(stream).serialize_bytes(stream, data, count)
+  def serialize_bytes(%WriteStream{} = stream, data, count) when is_integer(count) do
+    WriteStream.serialize_bytes(stream, data, count)
+  end
+
+  def serialize_bytes(%ReadStream{} = stream, data, count) when is_integer(count) do
+    ReadStream.serialize_bytes(stream, data, count)
+  end
+
+  def serialize_bytes(%MeasureStream{} = stream, data, count) when is_integer(count) do
+    MeasureStream.serialize_bytes(stream, data, count)
   end
 
   @doc """
@@ -663,7 +695,7 @@ defmodule Serialize do
   defp serialize_groups(stream, offset, bits, shift, acc) when bits <= 32 do
     group = if writing?(stream), do: offset >>> shift &&& Bits.mask(bits), else: 0
 
-    with {:ok, stream, group} <- smod(stream).serialize_bits(stream, group, bits) do
+    with {:ok, stream, group} <- serialize_bits(stream, group, bits) do
       {:ok, stream, if(reading?(stream), do: acc ||| group <<< shift, else: offset)}
     end
   end
@@ -671,11 +703,15 @@ defmodule Serialize do
   defp serialize_groups(stream, offset, bits, shift, acc) do
     group = if writing?(stream), do: offset >>> shift &&& 0xFFFFFFFF, else: 0
 
-    with {:ok, stream, group} <- smod(stream).serialize_bits(stream, group, 32) do
+    with {:ok, stream, group} <- serialize_bits(stream, group, 32) do
       serialize_groups(stream, offset, bits - 32, shift + 32, acc ||| group <<< shift)
     end
   end
 
+  # The hot per-field operations (bits, int, bytes, align) dispatch on
+  # function heads above -- a pattern match into a direct call. The wider
+  # and accessor operations route through this module table: one dynamic
+  # call per whole operation, off the per-bit-group path.
   defp smod(%WriteStream{}), do: WriteStream
   defp smod(%ReadStream{}), do: ReadStream
   defp smod(%MeasureStream{}), do: MeasureStream
