@@ -43,3 +43,10 @@ Writes assume trusted data — caller contract violations raise
 `ArgumentError`. Reads validate always. Non-finite IEEE-754 patterns travel
 through the bit-transparent `serialize_float`/`serialize_double` as
 `{:nonfinite, bits}`, since the BEAM has no non-finite float terms.
+
+The write stream grows without bound and takes no capacity: the runtime
+appends through ERTS append-optimized binaries (reserved space doubles as
+writes land, amortized O(1)), and Erlang exposes no way to pre-size a
+binary's reservation — so a capacity parameter here would be accepted and
+ignored. Sizing a buffer up front is the other ports' surface, where
+buffers are real.
