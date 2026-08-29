@@ -1,4 +1,4 @@
-# serialize.ex
+# serialize.elixir
 
 Bitpacked binary serialization for Elixir on the BEAM: the serialize wire
 format, byte-identical to the C, C++, C#, Go, Rust, JavaScript, Dart and Java
