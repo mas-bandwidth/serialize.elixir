@@ -45,11 +45,23 @@ defmodule Serialize.BitReader do
   @spec read_bits(t, 1..32) :: {non_neg_integer, t}
   def read_bits(%__MODULE__{} = reader, bits)
       when is_integer(bits) and bits >= 1 and bits <= 32 do
-    byte_index = reader.bits_read >>> 3
-    bit_offset = reader.bits_read &&& 7
+    {decode_bits(reader.data, reader.bits_read, bits),
+     %{reader | bits_read: reader.bits_read + bits}}
+  end
+
+  @doc """
+  The window decode itself, on plain values: the `bits` bits of `data` at
+  bit position `bits_read`. The packing model in one place — the streams
+  that carry their position inline (`Serialize.ReadStream`) decode through
+  this too. The caller has already checked the bounds.
+  """
+  @spec decode_bits(binary, non_neg_integer, 1..32) :: non_neg_integer
+  def decode_bits(data, bits_read, bits) do
+    byte_index = bits_read >>> 3
+    bit_offset = bits_read &&& 7
 
     window =
-      case reader.data do
+      case data do
         <<_::binary-size(^byte_index), word::little-40, _::binary>> ->
           word
 
@@ -57,8 +69,7 @@ defmodule Serialize.BitReader do
           :binary.decode_unsigned(rest, :little)
       end
 
-    value = window >>> bit_offset &&& (1 <<< bits) - 1
-    {value, %{reader | bits_read: reader.bits_read + bits}}
+    window >>> bit_offset &&& (1 <<< bits) - 1
   end
 
   @doc """

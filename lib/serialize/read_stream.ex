@@ -1,7 +1,12 @@
 defmodule Serialize.ReadStream do
   @moduledoc """
   Stream for reading bitpacked data: the read-mode counterpart of the
-  reference's `ReadStream`, wrapping `Serialize.BitReader`.
+  reference's `ReadStream`.
+
+  The reader state — the data, its bit length and the bit position — lives
+  directly in this struct, so each operation allocates exactly one updated
+  stream; the window decode itself is `Serialize.BitReader.decode_bits/3`,
+  the packing model's single home.
 
   Reads validate always: the bytes come from the network, so every refusal
   rule of STANDARD.md binds here — out-of-range offsets, non-zero align
@@ -12,15 +17,21 @@ defmodule Serialize.ReadStream do
 
   import Bitwise
 
-  alias Serialize.{Bits, BitReader}
+  alias Serialize.{BitReader, Bits}
 
-  defstruct reader: nil
+  defstruct data: <<>>, num_bits: 0, bits_read: 0
 
-  @type t :: %__MODULE__{reader: BitReader.t()}
+  @type t :: %__MODULE__{
+          data: binary,
+          num_bits: non_neg_integer,
+          bits_read: non_neg_integer
+        }
 
   @doc "A read stream over the given bytes."
   @spec new(binary) :: t
-  def new(data) when is_binary(data), do: %__MODULE__{reader: BitReader.new(data)}
+  def new(data) when is_binary(data) do
+    %__MODULE__{data: data, num_bits: byte_size(data) * 8}
+  end
 
   @doc """
   Reads a ranged 32-bit integer. The decoded offset must lie within the
@@ -52,40 +63,39 @@ defmodule Serialize.ReadStream do
   defp read_ranged(stream, min, _max, 0), do: {:ok, stream, min}
 
   defp read_ranged(stream, min, max, bits) do
-    if BitReader.would_read_past_end?(stream.reader, bits) do
+    if stream.bits_read + bits > stream.num_bits do
       {:error, stream}
     else
-      {offset, reader} = read_groups(stream.reader, bits, 0, 0)
+      {offset, bits_read} = read_groups(stream.data, stream.bits_read, bits, 0, 0)
 
       if offset > max - min do
-        {:error, %{stream | reader: reader}}
+        {:error, %{stream | bits_read: bits_read}}
       else
-        {:ok, %{stream | reader: reader}, min + offset}
+        {:ok, %{stream | bits_read: bits_read}, min + offset}
       end
     end
   end
 
-  @doc false
-  @spec read_groups(BitReader.t(), pos_integer, non_neg_integer, non_neg_integer) ::
-          {non_neg_integer, BitReader.t()}
-  def read_groups(reader, bits, acc, shift) when bits <= 32 do
-    {group, reader} = BitReader.read_bits(reader, bits)
-    {acc ||| group <<< shift, reader}
+  # 32-bit groups from least significant upward on plain values: the value
+  # accumulated so far, and the advanced bit position.
+  defp read_groups(data, bits_read, bits, acc, shift) when bits <= 32 do
+    group = BitReader.decode_bits(data, bits_read, bits)
+    {acc ||| group <<< shift, bits_read + bits}
   end
 
-  def read_groups(reader, bits, acc, shift) do
-    {group, reader} = BitReader.read_bits(reader, 32)
-    read_groups(reader, bits - 32, acc ||| group <<< shift, shift + 32)
+  defp read_groups(data, bits_read, bits, acc, shift) do
+    group = BitReader.decode_bits(data, bits_read, 32)
+    read_groups(data, bits_read + 32, bits - 32, acc ||| group <<< shift, shift + 32)
   end
 
   @doc "Reads `bits` bits, `bits` in `[1, 32]`."
   @spec serialize_bits(t, term, 1..32) :: {:ok, t, non_neg_integer} | {:error, t}
   def serialize_bits(%__MODULE__{} = stream, _value, bits) do
-    if BitReader.would_read_past_end?(stream.reader, bits) do
+    if stream.bits_read + bits > stream.num_bits do
       {:error, stream}
     else
-      {value, reader} = BitReader.read_bits(stream.reader, bits)
-      {:ok, %{stream | reader: reader}, value}
+      value = BitReader.decode_bits(stream.data, stream.bits_read, bits)
+      {:ok, %{stream | bits_read: stream.bits_read + bits}, value}
     end
   end
 
@@ -105,11 +115,11 @@ defmodule Serialize.ReadStream do
         {:ok, stream} ->
           # compared in bytes rather than bits, consistent with the
           # reference's 64-bit bookkeeping
-          if count > div(BitReader.bits_remaining(stream.reader), 8) do
+          if count > div(stream.num_bits - stream.bits_read, 8) do
             {:error, stream}
           else
-            {bytes, reader} = BitReader.read_bytes(stream.reader, count)
-            {:ok, %{stream | reader: reader}, bytes}
+            bytes = binary_part(stream.data, stream.bits_read >>> 3, count)
+            {:ok, %{stream | bits_read: stream.bits_read + count * 8}, bytes}
           end
       end
     end
@@ -121,27 +131,36 @@ defmodule Serialize.ReadStream do
   """
   @spec serialize_align(t) :: {:ok, t} | {:error, t}
   def serialize_align(%__MODULE__{} = stream) do
-    if BitReader.would_read_past_end?(stream.reader, BitReader.align_bits(stream.reader)) do
-      {:error, stream}
-    else
-      case BitReader.read_align(stream.reader) do
-        {:ok, reader} -> {:ok, %{stream | reader: reader}}
-        {:error, reader} -> {:error, %{stream | reader: reader}}
-      end
+    case rem(stream.bits_read, 8) do
+      0 ->
+        {:ok, stream}
+
+      remainder ->
+        bits = 8 - remainder
+
+        cond do
+          stream.bits_read + bits > stream.num_bits ->
+            {:error, stream}
+
+          BitReader.decode_bits(stream.data, stream.bits_read, bits) != 0 ->
+            # the padding bits are consumed either way, as in the reference
+            {:error, %{stream | bits_read: stream.bits_read + bits}}
+
+          true ->
+            {:ok, %{stream | bits_read: stream.bits_read + bits}}
+        end
     end
   end
 
   @doc "The number of zero pad bits an align would read now, in `[0, 7]`."
   @spec align_bits(t) :: 0..7
-  def align_bits(%__MODULE__{} = stream), do: BitReader.align_bits(stream.reader)
+  def align_bits(%__MODULE__{} = stream), do: rem(8 - rem(stream.bits_read, 8), 8)
 
   @doc "The number of bits read so far."
   @spec bits_processed(t) :: non_neg_integer
-  def bits_processed(%__MODULE__{} = stream), do: BitReader.bits_read(stream.reader)
+  def bits_processed(%__MODULE__{} = stream), do: stream.bits_read
 
   @doc "The number of bytes read so far: the bit count rounded up."
   @spec bytes_processed(t) :: non_neg_integer
-  def bytes_processed(%__MODULE__{} = stream) do
-    div(BitReader.bits_read(stream.reader) + 7, 8)
-  end
+  def bytes_processed(%__MODULE__{} = stream), do: div(stream.bits_read + 7, 8)
 end

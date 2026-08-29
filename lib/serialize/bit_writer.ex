@@ -90,12 +90,32 @@ defmodule Serialize.BitWriter do
   def write_bytes(%__MODULE__{} = writer, bytes) when is_binary(bytes) do
     0 = rem(writer.bits_written, 8)
 
-    # At byte alignment the scratch holds whole bytes of the current word;
-    # its little-endian bytes followed by the payload are the wire bytes
-    # from the current word boundary. Emit the completed words and retain
-    # the partial tail as the new scratch, so later writes pack into it
-    # exactly as if its bytes had gone through the packer.
-    combined = <<writer.scratch::little-size(writer.scratch_bits), bytes::binary>>
+    {data, scratch, scratch_bits} =
+      pack_bytes(writer.data, writer.scratch, writer.scratch_bits, bytes)
+
+    %{
+      writer
+      | data: data,
+        scratch: scratch,
+        scratch_bits: scratch_bits,
+        bits_written: writer.bits_written + byte_size(bytes) * 8
+    }
+  end
+
+  @doc """
+  The raw-bytes append on plain packer state, for a byte-aligned stream —
+  shared with the streams that carry the packer state inline
+  (`Serialize.WriteStream`).
+
+  At byte alignment the scratch holds whole bytes of the current word; its
+  little-endian bytes followed by the payload are the wire bytes from the
+  current word boundary. The completed words are emitted and the partial
+  tail retained as the new scratch, so later writes pack into it exactly as
+  if its bytes had gone through the packer.
+  """
+  @spec pack_bytes(binary, non_neg_integer, 0..31, binary) :: {binary, non_neg_integer, 0..31}
+  def pack_bytes(data, scratch, scratch_bits, bytes) do
+    combined = <<scratch::little-size(scratch_bits), bytes::binary>>
     whole_words_bytes = byte_size(combined) - rem(byte_size(combined), 4)
     <<words::binary-size(^whole_words_bytes), tail::binary>> = combined
 
@@ -105,13 +125,7 @@ defmodule Serialize.BitWriter do
         _ -> :binary.decode_unsigned(tail, :little)
       end
 
-    %{
-      writer
-      | data: <<writer.data::binary, words::binary>>,
-        scratch: scratch,
-        scratch_bits: byte_size(tail) * 8,
-        bits_written: writer.bits_written + byte_size(bytes) * 8
-    }
+    {<<data::binary, words::binary>>, scratch, byte_size(tail) * 8}
   end
 
   @doc """
