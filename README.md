@@ -44,6 +44,22 @@ Writes assume trusted data — caller contract violations raise
 through the bit-transparent `serialize_float`/`serialize_double` as
 `{:nonfinite, bits}`, since the BEAM has no non-finite float terms.
 
+## Benchmark
+
+The family benchmark, mirrored operation for operation from the C bench and
+golden gated against the C reference pins — it verifies its wire byte for
+byte before timing anything, and reports nothing on a failed gate:
+
+```sh
+mix run bench/bench.exs           # the rows, human readable
+mix run bench/bench.exs --csv     # the same numbers as CSV
+```
+
+Iteration counts are env-overridable (`BENCH_BITPACKER_PASSES`,
+`BENCH_STREAM_PACKETS`) for linearity checks at other scales.
+
+## Write stream growth
+
 The write stream grows without bound and takes no capacity: the runtime
 appends through ERTS append-optimized binaries (reserved space doubles as
 writes land, amortized O(1)), and Erlang exposes no way to pre-size a
