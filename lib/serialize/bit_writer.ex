@@ -3,11 +3,13 @@ defmodule Serialize.BitWriter do
   Bitpacks unsigned integer values into a binary.
 
   The scratch-word packing model of STANDARD.md governs: values pack into a
-  64-bit scratch least-significant-bit first, and each filled word is
-  appended to the output as 8 little-endian bytes. BEAM integers are
-  arbitrary precision, so the reference's spilled-bits recovery is a plain
-  right shift by 64, and the scratch is masked to the 64-bit domain only
-  when a word is emitted.
+  scratch least-significant-bit first, and each filled word is appended to
+  the output little-endian. The reference's word is 64 bits; this writer
+  emits 32-bit words — the byte stream is identical, because little-endian
+  words concatenate to the same little-endian bit stream at any word size —
+  and splits each value at the word boundary before shifting, so every
+  intermediate stays inside the BEAM's small-integer range (no value here
+  ever reaches 2^32, well under the 60-bit boxing boundary).
 
   The output binary is grown by appending, which the runtime optimizes into
   an amortized in-place extension for this single-writer pattern; there is
@@ -18,18 +20,14 @@ defmodule Serialize.BitWriter do
 
   import Bitwise
 
-  alias Serialize.Bits
-
   defstruct data: <<>>, scratch: 0, scratch_bits: 0, bits_written: 0
 
   @type t :: %__MODULE__{
           data: binary,
           scratch: non_neg_integer,
-          scratch_bits: 0..63,
+          scratch_bits: 0..31,
           bits_written: non_neg_integer
         }
-
-  @word_mask 0xFFFFFFFFFFFFFFFF
 
   @doc "A fresh writer with an empty stream."
   @spec new() :: t
@@ -45,23 +43,27 @@ defmodule Serialize.BitWriter do
   @spec write_bits(t, non_neg_integer, 1..32) :: t
   def write_bits(%__MODULE__{} = writer, value, bits)
       when is_integer(value) and value >= 0 and is_integer(bits) and bits >= 1 and bits <= 32 do
-    scratch = writer.scratch ||| (value &&& Bits.mask(bits)) <<< writer.scratch_bits
+    value = value &&& (1 <<< bits) - 1
     scratch_bits = writer.scratch_bits + bits
 
-    if scratch_bits >= 64 do
-      word = scratch &&& @word_mask
+    if scratch_bits >= 32 do
+      # split at the word boundary before shifting: the low part completes
+      # the 32-bit word, the high part becomes the new scratch, and neither
+      # side of either shift can reach 2^32
+      low_take = 32 - writer.scratch_bits
+      word = writer.scratch ||| (value &&& (1 <<< low_take) - 1) <<< writer.scratch_bits
 
       %{
         writer
-        | data: <<writer.data::binary, word::little-64>>,
-          scratch: scratch >>> 64,
-          scratch_bits: scratch_bits - 64,
+        | data: <<writer.data::binary, word::little-32>>,
+          scratch: value >>> low_take,
+          scratch_bits: scratch_bits - 32,
           bits_written: writer.bits_written + bits
       }
     else
       %{
         writer
-        | scratch: scratch,
+        | scratch: writer.scratch ||| value <<< writer.scratch_bits,
           scratch_bits: scratch_bits,
           bits_written: writer.bits_written + bits
       }
@@ -94,7 +96,7 @@ defmodule Serialize.BitWriter do
     # the partial tail as the new scratch, so later writes pack into it
     # exactly as if its bytes had gone through the packer.
     combined = <<writer.scratch::little-size(writer.scratch_bits), bytes::binary>>
-    whole_words_bytes = byte_size(combined) - rem(byte_size(combined), 8)
+    whole_words_bytes = byte_size(combined) - rem(byte_size(combined), 4)
     <<words::binary-size(^whole_words_bytes), tail::binary>> = combined
 
     scratch =
@@ -114,14 +116,18 @@ defmodule Serialize.BitWriter do
 
   @doc """
   Flushes any partially filled scratch word to the output. The stream then
-  occupies a whole number of 8-byte words, with zeros beyond the bit index.
+  occupies a whole number of words, with zeros beyond the bit index.
   """
   @spec flush(t) :: t
   def flush(%__MODULE__{scratch_bits: 0} = writer), do: writer
 
   def flush(%__MODULE__{} = writer) do
-    word = writer.scratch &&& @word_mask
-    %{writer | data: <<writer.data::binary, word::little-64>>, scratch: 0, scratch_bits: 0}
+    %{
+      writer
+      | data: <<writer.data::binary, writer.scratch::little-32>>,
+        scratch: 0,
+        scratch_bits: 0
+    }
   end
 
   @doc """
