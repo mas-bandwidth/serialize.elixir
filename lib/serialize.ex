@@ -474,7 +474,7 @@ defmodule Serialize do
     end
 
     raw_min = min <<< fraction_bits
-    raw_range = max - min <<< fraction_bits
+    raw_range = (max - min) <<< fraction_bits
     {raw_min, raw_range, Bits.bits_required(0, raw_range)}
   end
 
@@ -617,7 +617,7 @@ defmodule Serialize do
 
         pending != nil ->
           if unit >= 0xDC00 and unit <= 0xDFFF do
-            code_point = 0x10000 + (pending - 0xD800 <<< 10) + (unit - 0xDC00)
+            code_point = 0x10000 + ((pending - 0xD800) <<< 10) + (unit - 0xDC00)
             read_wstring(stream, remaining - 1, nil, [code_point | acc])
           else
             {:error, stream}

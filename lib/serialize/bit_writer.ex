@@ -59,7 +59,12 @@ defmodule Serialize.BitWriter do
           bits_written: writer.bits_written + bits
       }
     else
-      %{writer | scratch: scratch, scratch_bits: scratch_bits, bits_written: writer.bits_written + bits}
+      %{
+        writer
+        | scratch: scratch,
+          scratch_bits: scratch_bits,
+          bits_written: writer.bits_written + bits
+      }
     end
   end
 
