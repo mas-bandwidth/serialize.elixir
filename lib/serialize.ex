@@ -71,21 +71,36 @@ defmodule Serialize do
     MeasureStream.serialize_bits(stream, value, bits)
   end
 
-  def serialize_bits(stream, value, bits)
+  def serialize_bits(%WriteStream{} = stream, value, bits)
       when is_integer(bits) and bits > 32 and bits <= 64 do
-    if match?(%WriteStream{}, stream) do
-      unless is_integer(value) and value >= 0 and value <= @uint64_max do
-        raise ArgumentError, "serialize_bits value must be an integer in [0, 2^64-1]"
-      end
-
-      # the reference's truncation check is per 32-bit group: the low group
-      # truncates silently, the high group must fit its width
-      unless value >>> 32 <= Bits.mask(bits - 32) do
-        raise ArgumentError, "serialize_bits value #{value} does not fit #{bits} bits"
-      end
+    unless is_integer(value) and value >= 0 and value <= @uint64_max do
+      raise ArgumentError, "serialize_bits value must be an integer in [0, 2^64-1]"
     end
 
-    serialize_groups(stream, value, bits)
+    # the reference's truncation check is per 32-bit group: the low group
+    # truncates silently, the high group must fit its width
+    unless value >>> 32 <= Bits.mask(bits - 32) do
+      raise ArgumentError, "serialize_bits value #{value} does not fit #{bits} bits"
+    end
+
+    {:ok, stream, _} = WriteStream.serialize_bits(stream, value &&& 0xFFFFFFFF, 32)
+    {:ok, stream, _} = WriteStream.serialize_bits(stream, value >>> 32, bits - 32)
+    {:ok, stream, value}
+  end
+
+  def serialize_bits(%ReadStream{} = stream, _value, bits)
+      when is_integer(bits) and bits > 32 and bits <= 64 do
+    with {:ok, stream, lo} <- ReadStream.serialize_bits(stream, 0, 32),
+         {:ok, stream, hi} <- ReadStream.serialize_bits(stream, 0, bits - 32) do
+      {:ok, stream, hi <<< 32 ||| lo}
+    end
+  end
+
+  def serialize_bits(%MeasureStream{} = stream, value, bits)
+      when is_integer(bits) and bits > 32 and bits <= 64 do
+    {:ok, stream, _} = MeasureStream.serialize_bits(stream, 0, 32)
+    {:ok, stream, _} = MeasureStream.serialize_bits(stream, 0, bits - 32)
+    {:ok, stream, value}
   end
 
   @doc "Serializes an unsigned 8-bit integer: `serialize_bits/3` at width 8."
@@ -137,21 +152,19 @@ defmodule Serialize do
 
   @doc "Serializes a boolean as one bit: 1 for true, 0 for false."
   @spec serialize_bool(stream, boolean) :: result(boolean)
-  def serialize_bool(stream, value) do
-    bit =
-      if writing?(stream) do
-        unless is_boolean(value) do
-          raise ArgumentError, "serialize_bool value must be a boolean"
-        end
-
-        if value, do: 1, else: 0
-      else
-        0
-      end
-
-    with {:ok, stream, bit} <- serialize_bits(stream, bit, 1) do
-      {:ok, stream, if(reading?(stream), do: bit == 1, else: value)}
+  def serialize_bool(%ReadStream{} = stream, _value) do
+    with {:ok, stream, bit} <- ReadStream.serialize_bits(stream, 0, 1) do
+      {:ok, stream, bit == 1}
     end
+  end
+
+  def serialize_bool(stream, value) do
+    unless is_boolean(value) do
+      raise ArgumentError, "serialize_bool value must be a boolean"
+    end
+
+    {:ok, stream, _bit} = serialize_bits(stream, if(value, do: 1, else: 0), 1)
+    {:ok, stream, value}
   end
 
   # ------------------------------------------------------------------
@@ -217,12 +230,15 @@ defmodule Serialize do
   travels as `{:nonfinite, bits}` (see `Serialize.Float32`).
   """
   @spec serialize_float(stream, Float32.value()) :: result(Float32.value())
-  def serialize_float(stream, value) do
-    pattern = if writing?(stream), do: Float32.bits32(value), else: 0
-
-    with {:ok, stream, pattern} <- serialize_bits(stream, pattern, 32) do
-      {:ok, stream, if(reading?(stream), do: Float32.value32(pattern), else: value)}
+  def serialize_float(%ReadStream{} = stream, _value) do
+    with {:ok, stream, pattern} <- ReadStream.serialize_bits(stream, 0, 32) do
+      {:ok, stream, Float32.value32(pattern)}
     end
+  end
+
+  def serialize_float(stream, value) do
+    {:ok, stream, _pattern} = serialize_bits(stream, Float32.bits32(value), 32)
+    {:ok, stream, value}
   end
 
   @doc """
@@ -231,12 +247,15 @@ defmodule Serialize do
   travels as `{:nonfinite, bits}`.
   """
   @spec serialize_double(stream, Float32.value()) :: result(Float32.value())
-  def serialize_double(stream, value) do
-    pattern = if writing?(stream), do: Float32.bits64(value), else: 0
-
-    with {:ok, stream, pattern} <- serialize_bits(stream, pattern, 64) do
-      {:ok, stream, if(reading?(stream), do: Float32.value64(pattern), else: value)}
+  def serialize_double(%ReadStream{} = stream, _value) do
+    with {:ok, stream, pattern} <- serialize_bits(stream, 0, 64) do
+      {:ok, stream, Float32.value64(pattern)}
     end
+  end
+
+  def serialize_double(stream, value) do
+    {:ok, stream, _pattern} = serialize_bits(stream, Float32.bits64(value), 64)
+    {:ok, stream, value}
   end
 
   @doc """
