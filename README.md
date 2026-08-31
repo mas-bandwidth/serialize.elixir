@@ -108,44 +108,7 @@ tier, and the fixed point shapes at every group count — plus
 per-primitive unit suites, refusal proofs for hostile input, and the
 measure bound.
 
-## Benchmark
-
-The family benchmark, mirrored operation for operation from the C bench and
-golden gated against the C reference pins — it verifies its wire byte for
-byte before timing anything, and reports nothing on a failed gate:
-
-```sh
-mix run bench/bench.exs           # the rows, human readable
-mix run bench/bench.exs --csv     # the same numbers as CSV
-```
-
-Iteration counts are env-overridable (`BENCH_BITPACKER_PASSES`,
-`BENCH_STREAM_PACKETS`) for linearity checks at other scales.
-
-Current numbers at the family scale (4096 bitpacker passes, 1,000,000
-packets per stream row), measured on a MacBook Air (Apple Silicon) —
-only numbers from a quiet machine are meaningful, and only as ratios
-between family legs measured back to back on the same machine:
-
-```
-bitpacker write:      48.4 MB/s
-bitpacker read:       61.7 MB/s
-stream write:         42.2 MB/s  (0.9 M packets/s)
-stream read:          71.8 MB/s  (1.5 M packets/s)
-stream measure:                   2.0 M packets/s
-
-int packet   (runtime):       write:    1.3 M packets/s   read:    1.9 M packets/s
-bits packet  (runtime):       write:    1.5 M packets/s   read:    2.7 M packets/s
-mixed packet (runtime):       write:    1.1 M packets/s   read:    1.8 M packets/s
-```
-
-Two costs are structural and deliberately left visible rather than
-benched around: streams are immutable, so every packet constructs a
-fresh stream and every operation returns a new one, and the decoded
-packet is rebuilt as a new map per packet — the library's own surface,
-measured as shipped. Writes always validate their caller contract (the
-library has no separate release shape), so the checked variant is the
-only variant, and the numbers are the numbers a user gets.
+Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 ## Write stream growth
 
