@@ -12,8 +12,11 @@ the serialize family, wire compatible with the
 [Java](https://github.com/mas-bandwidth/serialize.java) libraries — the
 same values produce the same bytes in every implementation, so a stream
 written by one reads in any other.
-[STANDARD.md](https://github.com/mas-bandwidth/serialize/blob/main/STANDARD.md)
-in the C++ reference is the authority on every byte.
+[STANDARD.md](STANDARD.md) is the authority on every byte — a verbatim
+copy of the specification in
+[mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize),
+vendored here beside the implementation and held to the upstream text by
+a CI check.
 
 ## The surface
 
@@ -23,14 +26,16 @@ over three immutable streams — `Serialize.WriteStream`,
 function per message covers writing, reading and measuring. Every
 operation returns `{:ok, stream, value}` or `{:error, stream}`; writer
 contract violations raise `ArgumentError`; hostile bytes refuse as
-values and never raise. [USAGE.md](USAGE.md) teaches every operation by
-example.
+values and never raise. A refusal is terminal — the read stream latches
+failed, and every later read on it refuses — and hands back no value at
+all. [USAGE.md](USAGE.md) teaches every operation by example.
 
 - **Raw bits**: `serialize_bits/3` (1–64 bits in one call — BEAM
   integers are arbitrary precision), `serialize_align/1`.
 - **Ranged integers**: `serialize_int/4`, `serialize_int64/4`,
   `serialize_int128/4` — offset from min in exactly the bit length of
-  the range, zero bits for a degenerate range.
+  the range. `min <= max` is the legal relation at every width, and a
+  degenerate `min == max` range costs zero bits.
 - **Unsigned helpers and bool**: `serialize_uint8` / `16` / `32` / `64`,
   `serialize_uint128`, `serialize_bool/2`.
 - **Floats**: `serialize_float/2` and `serialize_double/2`, bit
@@ -43,8 +48,8 @@ example.
   payload validated on read); `serialize_wstring/3` (one 32-bit group
   per UTF-16 code unit, no alignment anywhere).
 - **The relative integer**: `serialize_int_relative/3` — the flag ladder
-  for strictly increasing uint32 sequences, one bit for a difference
-  of 1.
+  for strictly increasing sequences over the domain `0` to `2^31 - 1`,
+  one bit for a difference of 1.
 - **Fixed point**: `serialize_fixed/6` — Q formats at 8/16/32/64/128-bit
   storage in one function, the raw scaled integer as an exact ranged
   offset, byte identical to `serialize_int64` wherever storage fits 64
@@ -100,13 +105,17 @@ export PATH="$PWD/dist/otp-29.0.5/bin:$PWD/dist/elixir-1.20.4/bin:$PATH"
 mix test
 ```
 
-ExUnit alone, no test dependencies. The suite pins the family's golden
+ExUnit alone, no test dependencies. The suite runs the family's shared
+conformance corpus, vendored verbatim in [conformance/](conformance) and
+held to upstream by a CI check: every vector in it goes through this
+port's reader, and an accepted vector must yield its value and consume
+exactly the stated bits. Beside it the suite pins the family's golden
 vectors byte for byte — the golden wire message covering every operation
 class, the discriminating compressed-float vectors (bit patterns, not
 tolerances), the string and wide-string pins, every relative-integer
 tier, and the fixed point shapes at every group count — plus
-per-primitive unit suites, refusal proofs for hostile input, and the
-measure bound.
+per-primitive unit suites, refusal proofs for hostile input, terminal
+failure after every class of refusal, and the measure bound.
 
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 

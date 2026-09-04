@@ -14,3 +14,58 @@ jobs:
           elixir-version: "1.20.4"
       - run: mix format --check-formatted
       - run: mix test
+
+  spec-sync:
+    name: STANDARD.md matches upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # STANDARD.md here is a VERBATIM VENDORED COPY of the wire-format
+      # specification that lives in mas-bandwidth/serialize. This job fails if
+      # the two have diverged.
+      #
+      # Why vendor rather than link: an implementer wants the normative text
+      # beside the implementation, at the revision they are reading. Why check:
+      # a duplicated normative document is the same failure as a duplicated
+      # constant, except it drifts silently and the ports are what break.
+      #
+      # If this fails, the upstream spec changed. Read the diff, port whatever
+      # it implies, then copy the new file across in the same commit.
+      - name: Compare against mas-bandwidth/serialize
+        run: |
+          curl -fsSL -o /tmp/upstream-STANDARD.md \
+            https://raw.githubusercontent.com/mas-bandwidth/serialize/main/STANDARD.md
+          echo "upstream: mas-bandwidth/serialize@$(git ls-remote https://github.com/mas-bandwidth/serialize.git refs/heads/main | cut -f1)"
+          if ! diff -u /tmp/upstream-STANDARD.md STANDARD.md; then
+            echo "::error::STANDARD.md has diverged from mas-bandwidth/serialize"
+            exit 1
+          fi
+          echo "STANDARD.md matches upstream"
+
+  corpus-sync:
+    name: conformance/ matches upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # conformance/ here is a VERBATIM VENDORED COPY of the shared conformance
+      # corpus that lives in mas-bandwidth/serialize, one file per operation. It
+      # is vendored and checked for the same reasons STANDARD.md is, and the
+      # corpus is the instrument the standard names: Serialize.ConformanceTest
+      # runs every vector in it through this port's reader. A checker that
+      # regenerates its own expectations proves only that a port agrees with
+      # itself.
+      #
+      # If this fails, the upstream corpus changed. Read the diff, make the
+      # reader pass the new vectors, then copy the directory across in the same
+      # commit.
+      - name: Compare against mas-bandwidth/serialize
+        run: |
+          git clone --depth 1 --quiet https://github.com/mas-bandwidth/serialize.git /tmp/upstream-serialize
+          echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream-serialize rev-parse HEAD)"
+          if ! diff -ru /tmp/upstream-serialize/conformance conformance; then
+            echo "::error::conformance/ has diverged from mas-bandwidth/serialize"
+            exit 1
+          fi
+          echo "conformance/ matches upstream"

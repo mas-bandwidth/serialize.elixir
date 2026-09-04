@@ -168,10 +168,27 @@ defmodule Serialize.IntTest do
       assert {:error, _} = Serialize.serialize_int128(ReadStream.new(data), nil, 0, 1 <<< 70)
     end
 
-    test "the bounds must satisfy min < max strictly, as the reference asserts" do
-      assert_raise FunctionClauseError, fn ->
-        Serialize.serialize_int128(WriteStream.new(), 5, 5, 5)
-      end
+    test "a degenerate range is legal and costs zero bits on every stream" do
+      # STANDARD.md "int128 (ranged)": min <= max is the legal relation at
+      # this width too. The corpus pins the read side
+      # (conformance/int128.txt, degenerate-range-zero-bits); this covers
+      # the write and measure sides beside it.
+      value = 1_267_650_600_228_229_401_496_703_205_383
+
+      {:ok, writer, ^value} = Serialize.serialize_int128(WriteStream.new(), value, value, value)
+      writer = WriteStream.flush(writer)
+      assert Serialize.bits_processed(writer) == 0
+      assert WriteStream.data(writer) == <<>>
+
+      {:ok, reader, ^value} =
+        Serialize.serialize_int128(ReadStream.new(<<>>), nil, value, value)
+
+      assert Serialize.bits_processed(reader) == 0
+
+      {:ok, measure, ^value} =
+        Serialize.serialize_int128(MeasureStream.new(), value, value, value)
+
+      assert Serialize.bits_processed(measure) == 0
     end
   end
 
