@@ -143,6 +143,17 @@ tier, and the fixed point shapes at every group count — plus
 per-primitive unit suites, refusal proofs for hostile input, terminal
 failure after every class of refusal, and the measure bound.
 
+[`interop/`](interop) takes it further: the CI `interop` job builds the
+C++ reference at a pinned release and runs it head to head with this
+port. Both halves write the same boundary message — every operation the
+standard defines, at its boundary values — and the files must be byte
+identical; each then decodes the other's bytes and re-encodes them
+exactly; both must refuse every truncation of the other's stream; and
+both run the corpus. The release candidate in this repository exchanges
+bytes with the reference on every push, so wire compatibility is
+measured rather than asserted. `mix run interop/interop.exs write
+out.bin` runs one exchange by hand.
+
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 ## Write stream growth
