@@ -11,39 +11,65 @@ defmodule Serialize.ReadStream do
   Reads validate always: the bytes come from the network, so every refusal
   rule of STANDARD.md binds here — out-of-range offsets, non-zero align
   padding and truncated data refuse as `{:error, stream}` values, and
-  hostile bytes never raise. A refusal is terminal for the stream: nothing
-  after the failing operation has a defined position.
+  hostile bytes never raise.
+
+  Failure is terminal, in the standard's **latch** shape: this stream
+  survives a refusal, so it carries a `failed` flag, the first refusal sets
+  it, and every later read on that stream returns `{:error, stream}`
+  immediately — consuming no bits and decoding nothing. The rule is
+  uniform: any read that returns `{:error, stream}` latches it. A failure
+  persists until the stream is re-initialized, which here is `new/1` on a
+  fresh buffer, or until the stream is discarded.
   """
 
   import Bitwise
 
   alias Serialize.{BitReader, Bits}
 
-  defstruct data: <<>>, num_bits: 0, bits_read: 0
+  defstruct data: <<>>, num_bits: 0, bits_read: 0, failed: false
 
   @type t :: %__MODULE__{
           data: binary,
           num_bits: non_neg_integer,
-          bits_read: non_neg_integer
+          bits_read: non_neg_integer,
+          failed: boolean
         }
 
-  @doc "A read stream over the given bytes."
+  @doc "A read stream over the given bytes. Re-initialization clears a latch."
   @spec new(binary) :: t
   def new(data) when is_binary(data) do
     %__MODULE__{data: data, num_bits: byte_size(data) * 8}
   end
 
   @doc """
+  Latches the stream failed, so every later read on it refuses. Callers
+  refusing a read of their own — the operations in `Serialize` that decode
+  above these primitives — latch through this.
+  """
+  @spec fail(t) :: t
+  def fail(%__MODULE__{} = stream), do: %{stream | failed: true}
+
+  @doc "Whether a read on this stream has failed."
+  @spec failed?(t) :: boolean
+  def failed?(%__MODULE__{} = stream), do: stream.failed
+
+  @doc """
   Reads a ranged 32-bit integer. The decoded offset must lie within the
   range — reject, never clamp.
   """
   @spec serialize_integer(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
+  def serialize_integer(%__MODULE__{failed: true} = stream, _value, _min, _max),
+    do: {:error, stream}
+
   def serialize_integer(%__MODULE__{} = stream, _value, min, max) do
     read_ranged(stream, min, max, Bits.bits_required(min, max))
   end
 
   @doc "Reads a ranged 64-bit integer: low group first, then the remainder."
   @spec serialize_integer64(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
+  def serialize_integer64(%__MODULE__{failed: true} = stream, _value, _min, _max),
+    do: {:error, stream}
+
   def serialize_integer64(%__MODULE__{} = stream, _value, min, max) do
     read_ranged(stream, min, max, Bits.bits_required(min, max))
   end
@@ -53,6 +79,9 @@ defmodule Serialize.ReadStream do
   upward, the final group carrying the remainder.
   """
   @spec serialize_integer128(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
+  def serialize_integer128(%__MODULE__{failed: true} = stream, _value, _min, _max),
+    do: {:error, stream}
+
   def serialize_integer128(%__MODULE__{} = stream, _value, min, max) do
     read_ranged(stream, min, max, Bits.bits_required(min, max))
   end
@@ -64,12 +93,12 @@ defmodule Serialize.ReadStream do
 
   defp read_ranged(stream, min, max, bits) do
     if stream.bits_read + bits > stream.num_bits do
-      {:error, stream}
+      {:error, fail(stream)}
     else
       {offset, bits_read} = read_groups(stream.data, stream.bits_read, bits, 0, 0)
 
       if offset > max - min do
-        {:error, %{stream | bits_read: bits_read}}
+        {:error, fail(%{stream | bits_read: bits_read})}
       else
         {:ok, %{stream | bits_read: bits_read}, min + offset}
       end
@@ -90,9 +119,11 @@ defmodule Serialize.ReadStream do
 
   @doc "Reads `bits` bits, `bits` in `[1, 32]`."
   @spec serialize_bits(t, term, 1..32) :: {:ok, t, non_neg_integer} | {:error, t}
+  def serialize_bits(%__MODULE__{failed: true} = stream, _value, _bits), do: {:error, stream}
+
   def serialize_bits(%__MODULE__{} = stream, _value, bits) do
     if stream.bits_read + bits > stream.num_bits do
-      {:error, stream}
+      {:error, fail(stream)}
     else
       value = BitReader.decode_bits(stream.data, stream.bits_read, bits)
       {:ok, %{stream | bits_read: stream.bits_read + bits}, value}
@@ -104,9 +135,11 @@ defmodule Serialize.ReadStream do
   bytes, compared against the remaining whole bytes.
   """
   @spec serialize_bytes(t, term, integer) :: {:ok, t, binary} | {:error, t}
+  def serialize_bytes(%__MODULE__{failed: true} = stream, _data, _count), do: {:error, stream}
+
   def serialize_bytes(%__MODULE__{} = stream, _data, count) do
     if count < 0 do
-      {:error, stream}
+      {:error, fail(stream)}
     else
       case serialize_align(stream) do
         {:error, stream} ->
@@ -116,7 +149,7 @@ defmodule Serialize.ReadStream do
           # compared in bytes rather than bits, consistent with the
           # reference's 64-bit bookkeeping
           if count > div(stream.num_bits - stream.bits_read, 8) do
-            {:error, stream}
+            {:error, fail(stream)}
           else
             bytes = binary_part(stream.data, stream.bits_read >>> 3, count)
             {:ok, %{stream | bits_read: stream.bits_read + count * 8}, bytes}
@@ -130,6 +163,8 @@ defmodule Serialize.ReadStream do
   present and zero.
   """
   @spec serialize_align(t) :: {:ok, t} | {:error, t}
+  def serialize_align(%__MODULE__{failed: true} = stream), do: {:error, stream}
+
   def serialize_align(%__MODULE__{} = stream) do
     case rem(stream.bits_read, 8) do
       0 ->
@@ -140,11 +175,11 @@ defmodule Serialize.ReadStream do
 
         cond do
           stream.bits_read + bits > stream.num_bits ->
-            {:error, stream}
+            {:error, fail(stream)}
 
           BitReader.decode_bits(stream.data, stream.bits_read, bits) != 0 ->
             # the padding bits are consumed either way, as in the reference
-            {:error, %{stream | bits_read: stream.bits_read + bits}}
+            {:error, fail(%{stream | bits_read: stream.bits_read + bits})}
 
           true ->
             {:ok, %{stream | bits_read: stream.bits_read + bits}}

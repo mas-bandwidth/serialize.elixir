@@ -83,13 +83,48 @@ defmodule Serialize.IntRelativeTest do
     assert_raise ArgumentError, fn ->
       Serialize.serialize_int_relative(WriteStream.new(), 100, 99)
     end
+  end
 
+  test "the domain is 0 to 2^31 - 1, and it is the operation's, not the caller's" do
+    # both ends of the domain are writable
+    assert {:ok, _, 0x7FFFFFFF} =
+             Serialize.serialize_int_relative(WriteStream.new(), 0x7FFFFFFE, 0x7FFFFFFF)
+
+    # `previous` is caller state and never arrives off the wire, so one
+    # outside the domain is caller error, checked here by the guard — a
+    # 64-bit or unsigned 2^31 is caller error exactly as a negative one is
     assert_raise FunctionClauseError, fn ->
       Serialize.serialize_int_relative(WriteStream.new(), -1, 5)
     end
 
+    assert_raise FunctionClauseError, fn ->
+      Serialize.serialize_int_relative(WriteStream.new(), 0x8000_0000, 0x8000_0001)
+    end
+
+    # `current` past the top of the domain is caller error too
     assert_raise ArgumentError, fn ->
-      Serialize.serialize_int_relative(WriteStream.new(), 0, 0x1_0000_0000)
+      Serialize.serialize_int_relative(WriteStream.new(), 0x7FFFFFFF, 0x8000_0000)
+    end
+  end
+
+  test "a reconstruction leaving the domain refuses in every tier" do
+    # the corpus (conformance/int_relative.txt) is the authority on these
+    # bytes and pins an accept twin one step inside the domain for each;
+    # this states the rule in the suite's own terms, tier by tier
+    for {bytes, previous} <- [
+          {<<0x01>>, 0x7FFFFFFF},
+          {<<0x02>>, 0x7FFFFFFF},
+          {<<0x04>>, 0x7FFFFFFF},
+          {<<0x08, 0x00>>, 0x7FFFFFFF},
+          {<<0x10, 0x00, 0x00>>, 0x7FFFFFFF},
+          {<<0x20, 0x00, 0x00>>, 0x7FFFFFFF},
+          # the absolute tier's 32 raw bits are unsigned: the top bit set
+          # is outside the domain, not a negative value
+          {<<0x00, 0x00, 0x00, 0x00, 0x20>>, 100}
+        ] do
+      assert {:error, _} =
+               Serialize.serialize_int_relative(ReadStream.new(bytes), previous, nil),
+             "expected a refusal for #{inspect(bytes)} after #{previous}"
     end
   end
 
