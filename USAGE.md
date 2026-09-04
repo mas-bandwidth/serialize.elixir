@@ -1,8 +1,8 @@
 # Using serialize.elixir
 
 Everything the library does, by example. The wire format itself is
-defined by the C++ reference's
-[STANDARD.md](https://github.com/mas-bandwidth/serialize/blob/main/STANDARD.md);
+defined by [STANDARD.md](STANDARD.md), vendored here verbatim from
+[mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize);
 this document teaches the Elixir surface that speaks it.
 
 ```elixir
@@ -66,10 +66,9 @@ The check model is the family standard's ("Writes assume trusted data"):
 everything, because the wire is a trust boundary.
 
 On the read side, every failure — a truncated read, a value outside its
-range, nonzero alignment padding, a malformed string — refuses as
-`{:error, stream}`, and hostile bytes never raise. A refusal is terminal
-for the stream: nothing after the failing operation has a defined
-position.
+range, nonzero alignment padding, a malformed string, an `int_relative`
+reconstruction outside its domain — refuses as `{:error, stream}`, and
+hostile bytes never raise.
 
 ```elixir
 reader = ReadStream.new(<<0x00>>)              # 8 bits of data
@@ -78,6 +77,23 @@ Serialize.serialize_bits(reader, 0, 32)        # {:error, stream}: past the end
 # an offset smuggled into the bit headroom of a range is refused
 reader2 = ReadStream.new(<<0xFF>>)
 Serialize.serialize_int(reader2, 0, 0, 200)    # {:error, stream}: 8 bits carry 255
+```
+
+A refusal hands back **no value at all**: `{:error, stream}` has no third
+element, so there is nothing a caller can mistake for a decoded value,
+and the caller's own bindings are untouched.
+
+A refusal is also **terminal**. Nothing after the failing operation has a
+defined position, and the stream enforces that rather than your
+discipline: a refused read latches the stream failed, and every later
+read on it returns `{:error, stream}` immediately, consuming no bits and
+decoding nothing. The latch clears only by re-initialization —
+`ReadStream.new/1` on a fresh buffer.
+
+```elixir
+{:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
+ReadStream.failed?(stream)                     # true
+Serialize.serialize_bits(stream, 0, 1)         # {:error, stream}: 8 bits remain, and it still refuses
 ```
 
 On the write and measure sides, caller contract violations — a value
@@ -136,8 +152,10 @@ above `max - min` fails the read — reject, never clamp).
 64-bit and 128-bit bounds — arbitrary precision integers make the
 arithmetic exact at any width, and the wire is written in 32-bit groups
 least significant first. Where a 128-bit range fits 64 bits the bytes
-are identical to `serialize_int64/4`. The 128-bit bounds must satisfy
-`min < max` strictly, as the reference asserts at this width.
+are identical to `serialize_int64/4`. `min <= max` is the legal relation
+at all three widths: a degenerate `min == max` range is a field to
+accept, not a misuse, and costs zero bits on the 128-bit width exactly as
+on the narrower ones.
 
 ```elixir
 {:ok, stream, _} =
@@ -287,12 +305,17 @@ misordered or dangling surrogates.
 
 ## The relative integer
 
-`serialize_int_relative/3` prices strictly increasing unsigned 32-bit
-sequences — sequence numbers, ack chains. `current > previous` always,
-no wrapping. A difference of 1 costs a single bit; small differences
-ride payload tiers of 5/8/13/18/23 bits; past the ladder, six zero flags
-carry `current` itself as 32 raw bits, and the reader enforces the
-ordering on that absolute form too.
+`serialize_int_relative/3` prices strictly increasing sequences —
+sequence numbers, ack chains. The domain is `0` to `2^31 - 1` inclusive
+and both `previous` and `current` lie in it; `current > previous`
+always, no wrapping. A difference of 1 costs a single bit; small
+differences ride payload tiers of 5/8/13/18/23 bits; past the ladder,
+six zero flags carry `current` itself as 32 raw bits, read unsigned.
+
+The reader reconstructs `current` on BEAM integers, which cannot wrap at
+any width, and refuses the read unless the result lies in the domain and
+above `previous` — in the one-bit tier, in each of the five bounded
+tiers, and in the absolute tier alike.
 
 ```elixir
 {:ok, stream, _} = Serialize.serialize_int_relative(stream, 100, 101)   # 1 bit
@@ -301,8 +324,10 @@ ordering on that absolute form too.
 {:ok, reader, 101} = Serialize.serialize_int_relative(reader, 100, 0)
 ```
 
-`previous` is caller state, not wire: both sides already know it.
-Writing `current <= previous` raises `ArgumentError`.
+`previous` is caller state, not wire: both sides already know it, and
+one outside the domain is caller error the guard rejects — a 64-bit or
+unsigned `2^31` exactly as a negative one. Writing `current <= previous`,
+or a `current` past the top of the domain, raises `ArgumentError`.
 
 ## Fixed point
 
@@ -373,8 +398,11 @@ Any data length is supported and nothing past the data is read.
 ## Wire compatibility
 
 The same values produce the same bytes in every family implementation.
-This is not aspiration but pinned fact: the test suite carries the
-family's golden vectors — including the golden wire message covering
+This is not aspiration but pinned fact: the test suite runs the family's
+shared conformance corpus, vendored verbatim in
+[conformance/](conformance) — every vector through this port's reader,
+with the corpus, never this port, supplying the expectations. Beside it
+the suite carries the family's golden vectors — including the golden wire message covering
 every operation class, byte for byte — plus the discriminating float
 vectors, the string and wide-string pins, every relative-integer tier,
 and the fixed point shapes at every group count, all minted from the
