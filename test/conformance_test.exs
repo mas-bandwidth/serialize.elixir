@@ -505,21 +505,41 @@ defmodule Serialize.ConformanceTest do
       ["bool"] -> %{kind: :bool, value: @sentinel}
       ["align"] -> %{kind: :align, value: @sentinel}
       ["float"] -> %{kind: :float, value: @sentinel}
+      ["double"] -> %{kind: :double, value: @sentinel}
+      ["uint128"] -> %{kind: :uint128, value: @sentinel}
       ["object", n] -> %{kind: :object, count: number!(vector, text, n), steps: []}
       ["bytes", n] -> %{kind: :bytes, count: number!(vector, text, n), value: @sentinel}
       ["string", n] -> %{kind: :string, buffer_size: number!(vector, text, n), value: @sentinel}
       ["wstring", n] -> %{kind: :wstring, buffer_size: number!(vector, text, n), value: @sentinel}
-      ["int", lo, hi] -> int_step(vector, text, lo, hi)
+      ["int_relative", p] -> relative_step(vector, text, p)
+      ["int", lo, hi] -> int_step(vector, text, :int, lo, hi)
+      ["int64", lo, hi] -> int_step(vector, text, :int64, lo, hi)
+      ["int128", lo, hi] -> int_step(vector, text, :int128, lo, hi)
+      ["compressed_float", lo, hi, res] -> compressed_float_step(vector, text, lo, hi, res)
       ["fixed", ib, fb, lo, hi] -> fixed_step(vector, text, ib, fb, lo, hi)
       _other -> flunk("#{vector.name}: no runner for step '#{text}' [#{vector.file}]")
     end
   end
 
-  defp int_step(vector, text, lo, hi) do
+  defp int_step(vector, text, kind, lo, hi) do
     %{
-      kind: :int,
+      kind: kind,
       min: number!(vector, text, lo),
       max: number!(vector, text, hi),
+      value: @sentinel
+    }
+  end
+
+  defp relative_step(vector, text, previous) do
+    %{kind: :int_relative, previous: number!(vector, text, previous), value: @sentinel}
+  end
+
+  defp compressed_float_step(vector, text, min, max, res) do
+    %{
+      kind: :compressed_float,
+      min: float!(vector, text, min),
+      max: float!(vector, text, max),
+      res: float!(vector, text, res),
       value: @sentinel
     }
   end
@@ -686,6 +706,19 @@ defmodule Serialize.ConformanceTest do
 
       _other ->
         flunk("#{vector.name}: parameter '#{name}' is not a float32: #{inspect(text)}")
+    end
+  end
+
+  # A compressed_float step spells its three float32 bounds as words rather
+  # than as parameters, and a whole number among them is spelled without a
+  # fractional part.
+  defp float!(vector, what, text) do
+    case Float.parse(text) do
+      {number, ""} ->
+        number
+
+      _other ->
+        flunk("#{vector.name}: '#{text}' is not a float32, in #{what} [#{vector.file}]")
     end
   end
 
