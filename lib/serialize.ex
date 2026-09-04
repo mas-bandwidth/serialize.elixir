@@ -471,53 +471,27 @@ defmodule Serialize do
   @doc """
   Serializes a fixed point value (STANDARD.md "fixed"): `value` is the raw
   scaled integer of a Q format `integer_bits.fraction_bits`, and `min` and
-  `max` are bounds in whole units. The raw offset from `min <<<
-  fraction_bits` is written in exactly the bit length of the raw range,
-  split into 32-bit groups from least significant upward. A degenerate
-  range where `min == max` costs zero bits on every storage width. The
-  round trip is exact; the reader rejects an offset above the raw range.
+  `max` are bounds in whole units. The raw value is a ranged integer over
+  the raw bounds `min <<< fraction_bits` and `max <<< fraction_bits`, so
+  the operation IS `serialize_int128/4` over those bounds and shares its
+  codec: the offset in exactly the bit length of the raw range, split into
+  32-bit groups from least significant upward, a degenerate range where
+  `min == max` costing zero bits on every storage width, and a decoded
+  offset above the raw range refused. The round trip is exact. A raw value
+  outside the raw bounds is caller error and raises.
   """
   @spec serialize_fixed(stream, integer, pos_integer, non_neg_integer, integer, integer) ::
           result(integer)
   def serialize_fixed(stream, value, integer_bits, fraction_bits, min, max) do
-    {raw_min, raw_range, bits} = fixed_params(integer_bits, fraction_bits, min, max)
-
-    cond do
-      bits == 0 ->
-        if match?(%WriteStream{}, stream) and value != raw_min do
-          raise ArgumentError, "serialize_fixed value #{value} outside its degenerate range"
-        end
-
-        {:ok, stream, raw_min}
-
-      true ->
-        offset =
-          if writing?(stream) do
-            unless is_integer(value) and value >= raw_min and value - raw_min <= raw_range do
-              raise ArgumentError,
-                    "serialize_fixed value #{value} outside [#{min}, #{max}] whole units"
-            end
-
-            value - raw_min
-          else
-            0
-          end
-
-        with {:ok, stream, offset} <- serialize_groups(stream, offset, bits) do
-          cond do
-            not reading?(stream) -> {:ok, stream, value}
-            offset > raw_range -> refuse(stream)
-            true -> {:ok, stream, raw_min + offset}
-          end
-        end
-    end
+    {raw_min, raw_max} = fixed_params(integer_bits, fraction_bits, min, max)
+    smod(stream).serialize_integer128(stream, value, raw_min, raw_max)
   end
 
   # The declaration arithmetic: the Q format must fill one of the storage
   # widths, the bounds must be int64 whole units that fit the format's
   # capacity — signed when min is negative, with the sign bit counting
-  # toward integer_bits — and the wire cost is the bit length of the raw
-  # range. All one lane: BEAM integers cover every storage width.
+  # toward integer_bits — and the raw bounds are the whole-unit bounds
+  # scaled. All one lane: BEAM integers cover every storage width.
   defp fixed_params(integer_bits, fraction_bits, min, max) do
     unless is_integer(integer_bits) and integer_bits >= 1 and is_integer(fraction_bits) and
              fraction_bits >= 0 and (integer_bits + fraction_bits) in [8, 16, 32, 64, 128] do
@@ -542,9 +516,7 @@ defmodule Serialize do
       raise ArgumentError, "serialize_fixed bounds in whole units do not fit the Q format"
     end
 
-    raw_min = min <<< fraction_bits
-    raw_range = (max - min) <<< fraction_bits
-    {raw_min, raw_range, Bits.bits_required(0, raw_range)}
+    {min <<< fraction_bits, max <<< fraction_bits}
   end
 
   # ------------------------------------------------------------------
@@ -731,29 +703,8 @@ defmodule Serialize do
   def align_bits(stream), do: smod(stream).align_bits(stream)
 
   # ------------------------------------------------------------------
-  # shared group codec and dispatch
+  # stream dispatch
   # ------------------------------------------------------------------
-
-  # 32-bit groups from least significant upward, the final group carrying
-  # the remainder: the shared splitting rule of serialize_bits, the wide
-  # fixed point path and the ranged 128-bit integer.
-  defp serialize_groups(stream, offset, bits), do: serialize_groups(stream, offset, bits, 0, 0)
-
-  defp serialize_groups(stream, offset, bits, shift, acc) when bits <= 32 do
-    group = if writing?(stream), do: offset >>> shift &&& Bits.mask(bits), else: 0
-
-    with {:ok, stream, group} <- serialize_bits(stream, group, bits) do
-      {:ok, stream, if(reading?(stream), do: acc ||| group <<< shift, else: offset)}
-    end
-  end
-
-  defp serialize_groups(stream, offset, bits, shift, acc) do
-    group = if writing?(stream), do: offset >>> shift &&& 0xFFFFFFFF, else: 0
-
-    with {:ok, stream, group} <- serialize_bits(stream, group, 32) do
-      serialize_groups(stream, offset, bits - 32, shift + 32, acc ||| group <<< shift)
-    end
-  end
 
   # The hot per-field operations (bits, int, bytes, align) dispatch on
   # function heads above -- a pattern match into a direct call. The wider
