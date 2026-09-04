@@ -74,13 +74,39 @@ defmodule Serialize.TerminalTest do
     {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
 
     assert {:error, _} = Serialize.serialize_bits(stream, 0, 1)
+    assert {:error, _} = Serialize.serialize_bool(stream, nil)
+    assert {:error, _} = Serialize.serialize_uint128(stream, nil)
     assert {:error, _} = Serialize.serialize_int(stream, nil, 0, 1)
     assert {:error, _} = Serialize.serialize_int64(stream, nil, 0, 1)
     assert {:error, _} = Serialize.serialize_int128(stream, nil, 0, 1)
+    assert {:error, _} = Serialize.serialize_int_relative(stream, 0, nil)
+    assert {:error, _} = Serialize.serialize_float(stream, nil)
+    assert {:error, _} = Serialize.serialize_double(stream, nil)
+    assert {:error, _} = Serialize.serialize_compressed_float(stream, nil, 0, 1, 0.01)
     assert {:error, _} = Serialize.serialize_align(stream)
     assert {:error, _} = Serialize.serialize_bytes(stream, nil, 1)
     assert {:error, _} = Serialize.serialize_string(stream, nil, 16)
-    assert {:error, _} = Serialize.serialize_int_relative(stream, 0, nil)
+    assert {:error, _} = Serialize.serialize_wstring(stream, nil, 16)
+    assert {:error, _} = Serialize.serialize_fixed(stream, nil, 16, 16, -1, 1)
+  end
+
+  test "a zero-bit read refuses on a failed stream, at every operation that has one" do
+    # STANDARD.md, Reader Obligations: "Every read consults the failure
+    # state before it does anything else, zero-bit reads included, so a
+    # degenerate ranged read, an align on an already aligned stream, a
+    # bytes call of zero count and object all refuse on a stream that has
+    # already failed." Each read below consumes nothing and would
+    # otherwise always succeed, which is what a reader treating "consumes
+    # no bits" as "cannot fail" gets wrong.
+    {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
+    assert Serialize.align_bits(stream) == 0
+
+    assert {:error, _} = Serialize.serialize_int(stream, nil, 7, 7)
+    assert {:error, _} = Serialize.serialize_int64(stream, nil, 7, 7)
+    assert {:error, _} = Serialize.serialize_int128(stream, nil, 7, 7)
+    assert {:error, _} = Serialize.serialize_fixed(stream, nil, 16, 16, 7, 7)
+    assert {:error, _} = Serialize.serialize_align(stream)
+    assert {:error, _} = Serialize.serialize_bytes(stream, nil, 0)
   end
 
   test "a failed stream consumes no further bits" do
@@ -97,6 +123,17 @@ defmodule Serialize.TerminalTest do
     # latch is checked before the width, so this refuses too
     {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
     assert {:error, _} = Serialize.serialize_int128(stream, nil, 7, 7)
+  end
+
+  test "a degenerate fixed point range refuses on a failed stream rather than yielding raw min" do
+    # the fixed point codec is the ranged integer codec over the raw
+    # bounds, so a degenerate Q format meets the same latch as a
+    # degenerate int at every storage width
+    {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
+
+    assert {:error, _} = Serialize.serialize_fixed(stream, nil, 8, 8, 3, 3)
+    assert {:error, _} = Serialize.serialize_fixed(stream, nil, 16, 16, 7, 7)
+    assert {:error, _} = Serialize.serialize_fixed(stream, nil, 64, 64, 0, 0)
   end
 
   test "re-initialization clears the failure" do

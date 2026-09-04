@@ -133,9 +133,16 @@ mix test
 
 ExUnit alone, no test dependencies. The suite runs the family's shared
 conformance corpus, vendored verbatim in [conformance/](conformance) and
-held to upstream by a CI check: every vector in it goes through this
-port's reader, and an accepted vector must yield its value and consume
-exactly the stated bits. Beside it the suite pins the family's golden
+held to upstream by a CI check. The suite discovers that directory rather
+than naming its files, so a newly vendored file runs without anyone
+editing a list, an empty directory fails the run, and a vector whose
+operation the runner cannot drive fails rather than being skipped. Every
+vector goes through this port's reader: an accepted vector must yield its
+value and consume exactly the stated bits, a vector marked `writer =
+canonical` must round trip back through the write stream byte for byte,
+a sequence stating `measure_at_least` must measure at least its floor,
+and a refused vector must refuse, hand back no value, poison every later
+step and leave the stream terminal. Beside it the suite pins the family's golden
 vectors byte for byte — the golden wire message covering every operation
 class, the discriminating compressed-float vectors (bit patterns, not
 tolerances), the string and wide-string pins, every relative-integer
