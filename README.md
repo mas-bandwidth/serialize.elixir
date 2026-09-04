@@ -21,8 +21,8 @@ a CI check.
 ## Getting it
 
 serialize.elixir ships as source today. The implementation is ready and the
-package is not yet published: `mix.exs` declares the app `:serialize` at 1.1.0
-and carries no Hex package metadata, and nothing named `serialize` exists on
+package is not yet published: `mix.exs` declares the app `:serialize` and
+carries no Hex package metadata, and nothing named `serialize` exists on
 hex.pm. Publishing it there is a separate round.
 
 Depend on it from git:
@@ -30,7 +30,7 @@ Depend on it from git:
 ```elixir
 defp deps do
   [
-    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v1.1.0"}
+    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v1.1.2"}
   ]
 end
 ```
@@ -42,7 +42,10 @@ alias Serialize.{MeasureStream, ReadStream, WriteStream}
 ```
 
 Pure Elixir on the BEAM, zero dependencies. Pin a release tag as above rather
-than tracking `main`; v1.1.0 is current.
+than tracking `main`. The newest is on the
+[releases page](https://github.com/mas-bandwidth/serialize.elixir/releases): a
+release states a format version, and two endpoints interoperate only when they
+carry the same one.
 
 ## The surface
 
