@@ -18,6 +18,32 @@ copy of the specification in
 vendored here beside the implementation and held to the upstream text by
 a CI check.
 
+## Getting it
+
+serialize.elixir ships as source today. The implementation is ready and the
+package is not yet published: `mix.exs` declares the app `:serialize` at 1.1.0
+and carries no Hex package metadata, and nothing named `serialize` exists on
+hex.pm. Publishing it there is a separate round.
+
+Depend on it from git:
+
+```elixir
+defp deps do
+  [
+    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v1.1.0"}
+  ]
+end
+```
+
+`mix deps.get`, and the modules are yours:
+
+```elixir
+alias Serialize.{MeasureStream, ReadStream, WriteStream}
+```
+
+Pure Elixir on the BEAM, zero dependencies. Pin a release tag as above rather
+than tracking `main`; v1.1.0 is current.
+
 ## The surface
 
 The complete family operation set in the `Serialize` module, unified
