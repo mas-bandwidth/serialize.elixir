@@ -92,8 +92,10 @@ jobs:
   #   gh release list --repo mas-bandwidth/serialize --limit 1
   # Bump family-wide, deliberately, in its own commit per repo. SERIALIZE_TAG
   # below is the ONE place this repository names a version of the reference.
-  # (The spec-sync and corpus-sync jobs above deliberately stay on upstream main:
-  # drift DETECTION is their whole purpose.)
+  # (The spec-sync and corpus-sync jobs above deliberately stay on upstream main,
+  # and so does the reference CORPUS RUNNER built below: drift DETECTION is their
+  # whole purpose, and a runner is a tool for reading the corpus rather than a
+  # statement about the wire.)
   interop:
     name: interop with the C++ reference
     runs-on: ubuntu-latest
@@ -109,15 +111,26 @@ jobs:
       - name: Check out the C++ reference at the pinned release
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
 
+      # The corpus instrument moves with the corpus. conformance/ here is vendored
+      # from upstream MAIN and the corpus-sync job holds it there, so the reference
+      # runner that reads it comes from main too: a runner from an older release
+      # has no code for an operation the corpus grew after that release, and it
+      # must fail rather than skip such a vector, so pinning the two to different
+      # revisions is red by construction at every corpus expansion. This is not a
+      # wire-compat pin and it names no version: the LIBRARY the interop halves
+      # link against stays at SERIALIZE_TAG above.
+      - name: Check out the C++ reference at the corpus revision
+        run: git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/cpp-corpus
+
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
       # library's own checks enabled rather than around them. No -ffp-contract=off
       # either: the compressed float arithmetic is pinned in the library's source,
       # and building with default flags proves that rather than masking it.
-      - name: Build the C++ halves against the pinned library
+      - name: Build the C++ halves
         run: |
           c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_interop interop/interop.cpp
-          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_conformance /tmp/cpp-serialize/conformance.cpp
+          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-corpus -o /tmp/cpp_conformance /tmp/cpp-corpus/conformance.cpp
 
       - name: Both halves write byte identical wire data
         run: |
@@ -136,10 +149,10 @@ jobs:
           /tmp/cpp_interop refuse /tmp/elixir.bin
 
       # The corpus is the family's one conformance instrument, and its refusal
-      # vectors are what this step is for: the pinned reference reader and this
-      # port's reader are held to the same accepts and the same refusals, from the
-      # same vendored files. The corpus-sync job above proves those files match
-      # upstream.
+      # vectors are what this step is for: the reference reader and this port's
+      # reader are held to the same accepts and the same refusals, from the same
+      # vendored files. The corpus-sync job above proves those files match
+      # upstream, and the reference reader is built from that same revision.
       - name: Both halves run the shared conformance corpus
         run: |
           /tmp/cpp_conformance conformance/*.txt
