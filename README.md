@@ -1,5 +1,7 @@
 # serialize.elixir
 
+![serialize.elixir logo with a packed row of colored blocks](images/serialize.png)
+
 A bitpacking serialization library for **Elixir** on the BEAM. Part of
 the serialize family, wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
@@ -17,6 +19,8 @@ copy of the specification in
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize),
 vendored here beside the implementation and held to the upstream text by
 a CI check.
+
+If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
 
