@@ -8,6 +8,7 @@ defmodule Serialize.GoldenWireTest do
 
   @golden GoldenWire.golden_wire_bytes()
   @golden_bits GoldenWire.golden_bits()
+  @golden_read_bits GoldenWire.golden_read_bits()
 
   test "write side: serializing the golden values produces exactly the golden bytes" do
     {:ok, stream, _values} = GoldenWire.serialize(WriteStream.new(), GoldenWire.values())
@@ -21,7 +22,9 @@ defmodule Serialize.GoldenWireTest do
     {:ok, stream, decoded} =
       GoldenWire.serialize(ReadStream.new(@golden), GoldenWire.zero_values())
 
-    assert Serialize.bits_processed(stream) == @golden_bits
+    # the end consumed the final byte's padding: the stream is exactly read
+    assert Serialize.bits_processed(stream) == @golden_read_bits
+    assert @golden_read_bits == byte_size(@golden) * 8
     expected = GoldenWire.values()
 
     for key <- Map.keys(expected) do
@@ -30,7 +33,7 @@ defmodule Serialize.GoldenWireTest do
     end
   end
 
-  test "trailing bits: the writer zeroes them and the reader is indifferent to them" do
+  test "trailing bits: the writer zeroes them, a field read ignores them, and the end refuses them" do
     # writer obligation, small stream: a message ending 3 bits into its
     # final byte. the writer owns its output, so the zeros can only come
     # from the writer.
@@ -51,11 +54,22 @@ defmodule Serialize.GoldenWireTest do
     reader = ReadStream.new(doctored)
     {:ok, reader, head} = Serialize.serialize_bits(reader, 0, 32)
     assert head == 0xDEADBEEF
-    {:ok, _reader, tail} = Serialize.serialize_bits(reader, 0, 3)
+    {:ok, reader, tail} = Serialize.serialize_bits(reader, 0, 3)
     assert tail == 5
+
+    # but the end examines them: a set padding bit is a second encoding
+    {:error, reader} = Serialize.serialize_end(reader)
+    assert Serialize.refusal(reader) == :nonzero_padding
+
+    # and the writer's own bytes end cleanly
+    reader = ReadStream.new(data)
+    {:ok, reader, _} = Serialize.serialize_bits(reader, 0, 32)
+    {:ok, reader, _} = Serialize.serialize_bits(reader, 0, 3)
+    assert {:ok, reader} = Serialize.serialize_end(reader)
+    assert Serialize.bits_processed(reader) == 40
   end
 
-  test "trailing bits: a doctored golden stream decodes identically" do
+  test "trailing bits: the golden stream with its padding set is refused at the end" do
     bits_in_final_byte = rem(@golden_bits, 8)
     assert bits_in_final_byte != 0
     trailing_mask = 0xFF <<< bits_in_final_byte &&& 0xFF
@@ -63,10 +77,16 @@ defmodule Serialize.GoldenWireTest do
 
     doctored = doctor_last_byte(@golden, trailing_mask)
 
-    {:ok, stream, decoded} =
-      GoldenWire.serialize(ReadStream.new(doctored), GoldenWire.zero_values())
+    {:error, stream} = GoldenWire.serialize(ReadStream.new(doctored), GoldenWire.zero_values())
+    assert Serialize.refusal(stream) == :nonzero_padding
+  end
 
-    assert GoldenWire.matches?(decoded, GoldenWire.values())
+  test "trailing data: the golden stream with one zero byte more is refused at the end" do
+    {:error, stream} =
+      GoldenWire.serialize(ReadStream.new(@golden <> <<0>>), GoldenWire.zero_values())
+
+    assert Serialize.refusal(stream) == :trailing_data
+    # every field was read; the end refused without consuming the extra byte
     assert Serialize.bits_processed(stream) == @golden_bits
   end
 
@@ -101,8 +121,10 @@ defmodule Serialize.GoldenWireTest do
     {:error, clean} = GoldenWire.serialize(clean, GoldenWire.zero_values())
     {:error, poison} = GoldenWire.serialize(poison, GoldenWire.zero_values())
 
-    # refused at the same point
+    # refused at the same point, for the same reason
     assert Serialize.bits_processed(poison) == Serialize.bits_processed(clean)
+    assert Serialize.refusal(poison) == :past_end
+    assert Serialize.refusal(clean) == :past_end
   end
 
   test "measure bounds the write at every one of the 8 starting offsets" do
@@ -137,12 +159,12 @@ defmodule Serialize.GoldenWireTest do
     end
   end
 
-  test "the sabotage sweep: flipping any consumed bit defeats the battery, and no flip ever raises" do
-    # every one of the 891 consumed bits of the golden stream is load
-    # bearing: flipping any single one must make the read refuse or produce
-    # different values. the 5 trailing bits are the exact complement:
-    # flipping any of them must change nothing at all. hostile data never
-    # raises anywhere in the sweep.
+  test "the sabotage sweep: flipping any bit defeats the battery, and no flip ever raises" do
+    # every one of the 848 bits of the golden stream is load bearing:
+    # flipping any single one must make the read refuse or produce different
+    # values. That holds for the 843 bits of the fields and, since the end
+    # examines them, for the 5 bits of padding too: one value, one byte
+    # sequence. Hostile data never raises anywhere in the sweep.
     values = GoldenWire.values()
 
     for bit <- 0..(byte_size(@golden) * 8 - 1) do
@@ -156,12 +178,11 @@ defmodule Serialize.GoldenWireTest do
           {:error, _stream} -> false
         end
 
-      if bit < @golden_bits do
-        refute matches, "consumed bit #{bit} flipped: the doctored stream still decoded golden"
-      else
-        assert matches, "trailing bit #{bit} flipped: the doctored stream was not accepted"
-        {:ok, stream, _decoded} = result
-        assert Serialize.bits_processed(stream) == @golden_bits
+      refute matches, "bit #{bit} flipped: the doctored stream still decoded golden"
+
+      if bit >= @golden_bits do
+        {:error, stream} = result
+        assert Serialize.refusal(stream) == :nonzero_padding
       end
     end
   end

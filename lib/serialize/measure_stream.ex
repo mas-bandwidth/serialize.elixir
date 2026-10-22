@@ -55,6 +55,10 @@ defmodule Serialize.MeasureStream do
   @spec serialize_align(t) :: {:ok, t}
   def serialize_align(%__MODULE__{} = stream), do: {:ok, add(stream, 7)}
 
+  @doc "Charges the end of the object: nothing."
+  @spec serialize_end(t) :: {:ok, t}
+  def serialize_end(%__MODULE__{} = stream), do: {:ok, stream}
+
   @doc """
   The worst-case align cost: always 7, because the bit position a message
   is later written at is unknown to a measure.

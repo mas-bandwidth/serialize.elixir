@@ -13,7 +13,13 @@ jobs:
           otp-version: "29.0"
           elixir-version: "1.20.4"
       - run: mix format --check-formatted
-      - run: mix test
+      # zero warnings, the library and the suite alike
+      - run: mix compile --warnings-as-errors
+      - run: mix test --warnings-as-errors
+      # the negative controls: an operation with no runner goes red, and a
+      # reader with one refusal rule deleted fails exactly the vectors
+      # conformance-controls/<rule>.expected names
+      - run: mix test --only controls --warnings-as-errors
 
   spec-sync:
     name: STANDARD.md matches upstream
@@ -70,6 +76,22 @@ jobs:
           fi
           echo "conformance/ matches upstream"
 
+      # conformance-controls/ is vendored the same way: the .expected lists are
+      # the oracle the negative controls are held to, and the reference builds
+      # its own sabotaged readers from the same lists. IMPLEMENTING.md is the
+      # practice STANDARD.md links, vendored beside it.
+      - name: conformance-controls/ and IMPLEMENTING.md match upstream
+        run: |
+          if ! diff -ru /tmp/upstream-serialize/conformance-controls conformance-controls; then
+            echo "::error::conformance-controls/ has diverged from mas-bandwidth/serialize"
+            exit 1
+          fi
+          if ! diff -u /tmp/upstream-serialize/IMPLEMENTING.md IMPLEMENTING.md; then
+            echo "::error::IMPLEMENTING.md has diverged from mas-bandwidth/serialize"
+            exit 1
+          fi
+          echo "conformance-controls/ and IMPLEMENTING.md match upstream"
+
   # The port exists to be wire compatible; everything else is detail. This job is
   # the only place that claim is MEASURED against the reference itself: the exact
   # release candidate in this repository exchanges bytes with the exact C++
@@ -103,7 +125,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-latest
     env:
-      SERIALIZE_TAG: v1.16.2
+      SERIALIZE_TAG: v2.0.0
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -120,7 +142,11 @@ jobs:
       # no code for. STANDARD.md requires that to be red rather than skipped, so
       # it is checked here rather than assumed.
       - name: The vendored corpus is the pinned release's corpus
-        run: diff -ru /tmp/cpp-serialize/conformance conformance
+        run: |
+          diff -ru /tmp/cpp-serialize/conformance conformance
+          diff -ru /tmp/cpp-serialize/conformance-controls conformance-controls
+          diff -u /tmp/cpp-serialize/STANDARD.md STANDARD.md
+          diff -u /tmp/cpp-serialize/IMPLEMENTING.md IMPLEMENTING.md
 
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
@@ -143,7 +169,7 @@ jobs:
           mix run interop/interop.exs read /tmp/cpp.bin
           /tmp/cpp_interop read /tmp/elixir.bin
 
-      - name: Both halves refuse every truncation of the other's stream
+      - name: Both halves refuse every truncation of the other's stream, and one byte more
         run: |
           mix run interop/interop.exs refuse /tmp/cpp.bin
           /tmp/cpp_interop refuse /tmp/elixir.bin

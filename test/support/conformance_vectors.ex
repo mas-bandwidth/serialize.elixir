@@ -24,10 +24,15 @@ defmodule Serialize.ConformanceVectors do
   | `name` | a stable identifier for the vector |
   | `param` | one parameter as `name = value`, repeated per parameter |
   | `bytes` | the stream as hexadecimal pairs, empty for a zero-bit read |
-  | `expect` | `refused`, or `value = ` / `bits = 0x` and the decoded value |
+  | `expect` | `refused` and its reason, or `value = ` / `bits = 0x` and the decoded value |
   | `consumed` | bits a conforming reader consumes, accepted reads only |
   | `writer` | `canonical`, on a vector that also pins the emitted bytes |
+  | `writer_input` | `bits = 0x` and a float32 pattern a writer is handed (`compressed_float`) |
   | `measure_at_least` | the floor a conforming measure may report |
+
+  A refusal states its reason from STANDARD.md's closed list, and a missing
+  or unknown reason is a malformed record: it raises, and the vector is red.
+  Names are unique across the corpus, and `all/0` raises on a duplicate.
 
   Parameter values stay as text here. They are typed by the operation's own
   table — `res` under `compressed_float` is a `float32` where `min` under
@@ -45,9 +50,10 @@ defmodule Serialize.ConformanceVectors do
             expect: nil,
             consumed: nil,
             measure_at_least: nil,
-            writer_canonical: false
+            writer_canonical: false,
+            writer_input: nil
 
-  @type expect :: :refused | {:value | :bits, [String.t()]}
+  @type expect :: {:refused, atom} | {:value | :bits, [String.t()]}
 
   @type t :: %__MODULE__{
           file: String.t(),
@@ -59,7 +65,8 @@ defmodule Serialize.ConformanceVectors do
           expect: expect,
           consumed: non_neg_integer | nil,
           measure_at_least: non_neg_integer | nil,
-          writer_canonical: boolean
+          writer_canonical: boolean,
+          writer_input: non_neg_integer | nil
         }
 
   @dir Path.expand("../../conformance", __DIR__)
@@ -72,9 +79,22 @@ defmodule Serialize.ConformanceVectors do
   @spec files() :: [String.t()]
   def files, do: @dir |> Path.join("*.txt") |> Path.wildcard() |> Enum.sort()
 
-  @doc "Every vector in the corpus, in file order."
+  @doc """
+  Every vector in the corpus, in file order. A name stated twice raises:
+  names are unique across the corpus.
+  """
   @spec all() :: [t]
-  def all, do: Enum.flat_map(files(), &parse_file/1)
+  def all do
+    vectors = Enum.flat_map(files(), &parse_file/1)
+
+    case vectors |> Enum.frequencies_by(& &1.name) |> Enum.filter(fn {_, n} -> n > 1 end) do
+      [] ->
+        vectors
+
+      duplicates ->
+        raise "vector names stated more than once: #{inspect(Keyword.keys(duplicates))}"
+    end
+  end
 
   @doc "Every vector in one corpus file, in file order."
   @spec parse_file(String.t()) :: [t]
@@ -128,6 +148,9 @@ defmodule Serialize.ConformanceVectors do
       ["writer", "canonical"] ->
         %{record | writer_canonical: true}
 
+      ["writer_input", value] ->
+        %{record | writer_input: parse_writer_input(value, path)}
+
       other ->
         raise "#{path}: unknown line #{inspect(other)}"
     end
@@ -155,7 +178,16 @@ defmodule Serialize.ConformanceVectors do
   # `expect value` lists one entry per step separated by ` | `, with `-` for
   # a step that produces no value of its own. `expect bits = 0x...` is the
   # same list, spelled for a value compared as a bit pattern.
-  defp parse_expect("refused", _path), do: :refused
+  # `expect refused <reason>`: the reason is one of the closed list, and a
+  # refusal stating none, or one the list does not hold, is malformed
+  defp parse_expect("refused " <> reason, path) do
+    case Enum.find(Serialize.ReadStream.refusals(), &(Atom.to_string(&1) == reason)) do
+      nil -> raise "#{path}: unknown refusal reason #{inspect(reason)}"
+      refusal -> {:refused, refusal}
+    end
+  end
+
+  defp parse_expect("refused", path), do: raise("#{path}: a refusal states no reason")
 
   defp parse_expect(value, path) do
     case String.split(value, "=", parts: 2) do
@@ -170,6 +202,16 @@ defmodule Serialize.ConformanceVectors do
 
       _other ->
         raise "#{path}: malformed expect line: #{inspect(value)}"
+    end
+  end
+
+  # `writer_input bits = 0x...`: a float32 pattern, carried as its bits
+  defp parse_writer_input(value, path) do
+    with ["bits", "0x" <> digits] <- value |> String.split("=") |> Enum.map(&String.trim/1),
+         {bits, ""} when bits >= 0 and bits <= 0xFFFFFFFF <- Integer.parse(digits, 16) do
+      bits
+    else
+      _other -> raise "#{path}: malformed writer_input line: #{inspect(value)}"
     end
   end
 

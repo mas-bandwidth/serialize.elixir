@@ -16,7 +16,7 @@ serialize function. Streams are immutable — every operation returns
 
 - `{:ok, stream, value}` — the advanced stream, and the value written
   (echoed) or read (decoded);
-- `{:ok, stream}` — for `serialize_align/1`;
+- `{:ok, stream}` — for `serialize_align/1` and `serialize_end/1`;
 - `{:error, stream}` — a read refusal, the reference's `false` return.
 
 so a message composes as a `with` chain, and the stream direction
@@ -25,7 +25,8 @@ decides whether the value argument is consumed or ignored:
 ```elixir
 def serialize(stream, d) do
   with {:ok, stream, x} <- Serialize.serialize_int(stream, d.x, -100, 100),
-       {:ok, stream, flag} <- Serialize.serialize_bool(stream, d.flag) do
+       {:ok, stream, flag} <- Serialize.serialize_bool(stream, d.flag),
+       {:ok, stream} <- Serialize.serialize_end(stream) do
     {:ok, stream, %{d | x: x, flag: flag}}
   end
 end
@@ -58,6 +59,38 @@ message; its bound is conservative (see [Measuring](#measuring)).
 
 All three streams answer `Serialize.bits_processed/1`,
 `Serialize.bytes_processed/1` and `Serialize.align_bits/1`.
+
+## The end of a packet, and refusal reasons
+
+A packet is one object and its end. A reader calls `serialize_end/1`
+after the last field of the top-level object: it refuses a whole byte or
+more left over as `:trailing_data` (checked first), and a set bit among
+the final byte's unused bits as `:nonzero_padding`, then consumes that
+padding, so the stream is exactly read. A writer's end writes nothing,
+and a measure's costs nothing. Without the end, trailing bytes and
+padding go unexamined, and one value would no longer be one byte
+sequence.
+
+Every refusal names the rule that refused it, from the standard's
+closed list, and the read stream keeps the first one —
+`Serialize.refusal/1` reads it, and the later refusals of a failed
+stream are echoes that keep it:
+
+| reason | the rule that refuses |
+|---|---|
+| `:past_end` | a read needs more bits than the stream holds |
+| `:value_out_of_range` | a ranged offset past its span, a string length past its buffer, a compressed integer past its ceiling, an `int_relative` outside its domain or not increasing |
+| `:nonzero_padding` | a set bit in an align's padding, or in the final byte at the end |
+| `:trailing_data` | a whole byte or more after the end of the object |
+| `:non_finite_float` | a `float` or `double` that is NaN or an infinity, or a compressed float decode that is not finite |
+| `:invalid_utf8` | a string payload that is not well-formed UTF-8 |
+| `:embedded_nul` | a zero byte among a string's bytes |
+| `:non_canonical` | the `int_relative` absolute tier carrying a difference a bounded tier carries |
+
+```elixir
+{:error, reader} = serialize(ReadStream.new(<<0xFF, 0x00>>), %{x: 0, flag: false})
+Serialize.refusal(reader) # :value_out_of_range
+```
 
 ## Writes trust, reads validate
 
@@ -194,33 +227,29 @@ Values are plain non-negative integers at every width — no pair types,
 no bit-transparent signed carriers: arbitrary precision integers hold
 the full unsigned 128-bit domain directly.
 
-## Floats and doubles: bit transparent
+## Floats and doubles: finite, every bit exact
 
-`serialize_float/2` (32 bits) and `serialize_double/2` (64 bits)
-reproduce the transmitted pattern exactly — every pattern is legal on
-the wire: NaNs with any payload, signaling NaNs, infinities, negative
-zero, denormals.
+`serialize_float/2` (32 bits) and `serialize_double/2` (64 bits) carry
+finite values and reproduce every one of them bit for bit, negative zero
+and the subnormals included. NaN, with any payload or sign, and both
+infinities are not values the format carries: a reader refuses their
+patterns as `:non_finite_float`, testing the raw bits before anything is
+converted. BEAM float terms are always finite, so a writer is never
+handed one.
 
 ```elixir
 {:ok, stream, _} = Serialize.serialize_float(stream, Serialize.Float32.round32(3.1415926))
 {:ok, stream, _} = Serialize.serialize_double(stream, 1.0 / 3.0)
+
+# an infinity on the wire is refused
+{:error, reader} = Serialize.serialize_float(ReadStream.new(<<0, 0, 0x80, 0x7F>>), nil)
+Serialize.refusal(reader) # :non_finite_float
 ```
 
 A float is 32 bits on the wire: write values rounded through
 `Serialize.Float32.round32/1` or the read-back differs from what you
-wrote.
-
-**Non-finite patterns travel as `{:nonfinite, bits}`** — BEAM float
-terms cannot be NaN or infinity, so the exact IEEE-754 pattern rides in
-a tagged integer instead, and the wire stays bit transparent:
-
-```elixir
-{:ok, stream, _} = Serialize.serialize_float(stream, {:nonfinite, 0x7F800001})   # a signaling NaN
-{:ok, stream, _} = Serialize.serialize_double(stream, {:nonfinite, 0xFFF0000000000000}) # -Inf
-
-# the read side hands the same tagged pattern back, bit for bit
-{:ok, _reader, {:nonfinite, 0x7F800001}} = Serialize.serialize_float(reader, 0.0)
-```
+wrote. A double too large for float32 narrows to an infinity, so
+writing it as a float raises `ArgumentError`.
 
 `Serialize.Float32` carries the pattern helpers: `bits32/1` / `value32/1`,
 `bits64/1` / `value64/1`, `finite32?/1` / `finite64?/1`, and `round32/1`
@@ -243,8 +272,11 @@ family's discriminating vectors pin the decoded bit patterns.
 ```
 
 Finite values outside `[min, max]` clamp on write; a non-finite value or
-declaration raises `ArgumentError` (writer contract); reads refuse
-integers smuggled above the quantization ceiling.
+declaration raises `ArgumentError` (writer contract), and so does a
+declaration whose top integer decodes past the float32 range
+(`min + delta` rounding to an infinity). Reads refuse integers smuggled
+above the quantization ceiling as `:value_out_of_range`, and a decode
+that is not finite as `:non_finite_float`, whatever the declaration.
 
 ## Raw bytes
 
@@ -278,30 +310,14 @@ already UTF-8, so the payload is the binary itself.
 {:ok, reader, "golden"} = Serialize.serialize_string(reader, nil, 16)
 ```
 
-Reads validate the payload in every case: malformed UTF-8 and interior
-NULs refuse as `{:error, stream}` — an interior NUL is the classic
-two-lengths smuggling primitive. On write, the payload is well-formed
+Reads validate the payload in every case: an interior NUL refuses as
+`:embedded_nul` — the classic two-lengths smuggling primitive, checked
+over the whole payload first — and malformed UTF-8 as `:invalid_utf8`.
+An accepted payload comes back exactly as read: no normalization, no
+stripped byte order mark, no replacement character, every plane. On write, the payload is well-formed
 UTF-8 with no interior NUL by writer contract (unchecked, per the
 trusted-writes doctrine); a value that is not a binary, or does not fit
 `buffer_size`, raises `ArgumentError`.
-
-## Wide strings: UTF-16 code units
-
-`serialize_wstring/3` sends the unit count, then one 32-bit group per
-UTF-16 code unit — never a code point — with no alignment anywhere: the
-one place the wide path deliberately differs from its narrow
-counterpart. An astral code point travels as its surrogate pair, exactly
-as the family's 2-byte-wchar_t ports split it, and the pair recombines
-into the code point on read. `buffer_size` counts wide characters.
-
-```elixir
-{:ok, stream, _} = Serialize.serialize_wstring(stream, "😀A", 8)  # 3 code units: 99 bits
-# ...
-{:ok, reader, "😀A"} = Serialize.serialize_wstring(reader, nil, 8)
-```
-
-Reads refuse groups above 0xFFFF, interior NUL groups, and unpaired,
-misordered or dangling surrogates.
 
 ## The relative integer
 
@@ -313,9 +329,11 @@ differences ride payload tiers of 5/8/13/18/23 bits; past the ladder,
 six zero flags carry `current` itself as 32 raw bits, read unsigned.
 
 The reader reconstructs `current` on BEAM integers, which cannot wrap at
-any width, and refuses the read unless the result lies in the domain and
-above `previous` — in the one-bit tier, in each of the five bounded
-tiers, and in the absolute tier alike.
+any width, and refuses the read as `:value_out_of_range` unless the result
+lies in the domain and above `previous` — in the one-bit tier, in each of
+the five bounded tiers, and in the absolute tier alike. Each value has
+one encoding, the first tier its difference fits: the absolute tier
+carrying a difference of 69914 or less is refused as `:non_canonical`.
 
 ```elixir
 {:ok, stream, _} = Serialize.serialize_int_relative(stream, 100, 101)   # 1 bit
@@ -404,7 +422,7 @@ shared conformance corpus, vendored verbatim in
 with the corpus, never this port, supplying the expectations. Beside it
 the suite carries the family's golden vectors — including the golden wire message covering
 every operation class, byte for byte — plus the discriminating float
-vectors, the string and wide-string pins, every relative-integer tier,
+vectors, the string pins, every relative-integer tier,
 and the fixed point shapes at every group count, all minted from the
 canonical C++ reference's own output. If your message serializes with
 the same declarations on both ends, a stream written by any family
@@ -412,7 +430,7 @@ implementation reads in any other.
 
 Two doctrines worth knowing at the edges:
 
-- **Trailing bits**: writers zero the unused bits of the final byte;
-  readers never reject a stream for their contents.
+- **Trailing bits**: writers zero the unused bits of the final byte; a
+  field read never looks at them, and the end refuses a set one.
 - **Past-end data**: bytes past the end of the data you hand
   `ReadStream.new/1` are never read, let alone interpreted.

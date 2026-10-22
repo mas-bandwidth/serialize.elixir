@@ -2,7 +2,7 @@ defmodule Serialize.Test.GoldenWire do
   @moduledoc """
   The family's cross-language conformance message: GoldenWireData,
   GoldenWireSerialize and golden_wire_bytes, ported operation for operation
-  from serialize.h. The bytes are pinned forever — a failing pin here means
+  from serialize.h, and STANDARD.md "The whole message" at format 2.0. The bytes are pinned forever — a failing pin here means
   the wire format changed, which is a breaking change and never something
   to fix by adjusting this module.
   """
@@ -16,21 +16,25 @@ defmodule Serialize.Test.GoldenWire do
   @int64_min -0x8000000000000000
   @int64_max 0x7FFFFFFFFFFFFFFF
 
-  # serialize.h's golden_wire_bytes, copied mechanically from the reference
-  # source: 112 bytes, 891 consumed bits, 5 trailing bits.
+  # STANDARD.md "The whole message", format 2.0: 106 bytes. The last field
+  # ends at bit 843, and the reader's end consumes the five bits of padding
+  # after it: 848 bits.
   @golden_wire_bytes <<0x5D, 0xDA, 0xF7, 0xE6, 0xD5, 0x77, 0xDF, 0x56, 0xEF, 0x9F, 0x75, 0x19,
                        0x52, 0xBC, 0xDA, 0x0F, 0x49, 0x40, 0xF4, 0x55, 0x55, 0x55, 0x55, 0x55,
                        0x55, 0x55, 0xFF, 0xFC, 0xD1, 0x48, 0xE0, 0x59, 0xD1, 0x48, 0xC0, 0x7B,
                        0xF3, 0x6A, 0xE2, 0x59, 0xD1, 0x48, 0x84, 0xB7, 0x06, 0xDE, 0xAD, 0xBE,
-                       0xEF, 0xCA, 0xFE, 0x01, 0x06, 0x67, 0x6F, 0x6C, 0x64, 0x65, 0x6E, 0xE3,
-                       0x21, 0x00, 0x00, 0xC0, 0x21, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
-                       0xC0, 0x60, 0x00, 0x80, 0xA2, 0x7C, 0xFC, 0xEC, 0x26, 0xCB, 0xFF, 0xFF,
-                       0x4B, 0x1D, 0x1F, 0xEF, 0xD2, 0x1A, 0x1F, 0x01, 0xE9, 0xFF, 0xFF, 0x09,
-                       0x19, 0x2A, 0x3B, 0x4C, 0x5D, 0x6E, 0x7F, 0x78, 0x6F, 0x5E, 0x4D, 0x3C,
-                       0x2B, 0x1A, 0x09, 0x04>>
+                       0xEF, 0xCA, 0xFE, 0x01, 0x06, 0x67, 0x6F, 0x6C, 0x64, 0x65, 0x6E, 0x06,
+                       0xE7, 0xA2, 0x81, 0xE7, 0x9F, 0xB3, 0xC0, 0x60, 0x00, 0x80, 0xA2, 0x7C,
+                       0xFC, 0xEC, 0x26, 0xCB, 0xFF, 0xFF, 0x4B, 0x1D, 0x1F, 0xEF, 0xD2, 0x1A,
+                       0x1F, 0x01, 0xE9, 0xFF, 0xFF, 0x09, 0x19, 0x2A, 0x3B, 0x4C, 0x5D, 0x6E,
+                       0x7F, 0x78, 0x6F, 0x5E, 0x4D, 0x3C, 0x2B, 0x1A, 0x09, 0x04>>
 
   def golden_wire_bytes, do: @golden_wire_bytes
-  def golden_bits, do: 891
+  # the bits the message's fields occupy: what a writer reports
+  def golden_bits, do: 843
+
+  # what a reader reports after its end has consumed the final padding
+  def golden_read_bits, do: 848
 
   # GoldenWireInit, field for field. Fixed point fields carry the raw
   # scaled integers, exactly as the reference stores them.
@@ -56,8 +60,8 @@ defmodule Serialize.Test.GoldenWire do
       relative_far: 2100,
       bytes: <<0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x01>>,
       string: "golden",
-      # cyrillic, BMP only: explicit code points 0x043C 0x0438 0x0440
-      wstring: "мир",
+      # 碁石, go stones: explicit code points U+7881 U+77F3, six UTF-8 bytes
+      stones: "\u{7881}\u{77F3}",
       # -3.25 in Q8.8
       fixed_q8_8: -(3 * 256 + 64),
       # 1234.5 in Q16.16
@@ -79,7 +83,7 @@ defmodule Serialize.Test.GoldenWire do
     |> Map.new(fn
       {:bytes, _v} -> {:bytes, <<0::56>>}
       {:string, _v} -> {:string, nil}
-      {:wstring, _v} -> {:wstring, nil}
+      {:stones, _v} -> {:stones, nil}
       {:flag, _v} -> {:flag, false}
       {key, _v} -> {key, 0}
     end)
@@ -118,7 +122,7 @@ defmodule Serialize.Test.GoldenWire do
          {:ok, stream} <- Serialize.serialize_align(stream),
          {:ok, stream, bytes} <- Serialize.serialize_bytes(stream, d.bytes, 7),
          {:ok, stream, string} <- Serialize.serialize_string(stream, d.string, 16),
-         {:ok, stream, wstring} <- Serialize.serialize_wstring(stream, d.wstring, 8),
+         {:ok, stream, stones} <- Serialize.serialize_string(stream, d.stones, 8),
          # the fixed point section starts byte aligned, so every byte
          # pinned above it stays put
          {:ok, stream} <- Serialize.serialize_align(stream),
@@ -144,7 +148,9 @@ defmodule Serialize.Test.GoldenWire do
            ),
          # full unit range: 128 bits, the four-group structure
          {:ok, stream, fixed_q64_64_wide} <-
-           Serialize.serialize_fixed(stream, d.fixed_q64_64_wide, 64, 64, @int64_min, @int64_max) do
+           Serialize.serialize_fixed(stream, d.fixed_q64_64_wide, 64, 64, @int64_min, @int64_max),
+         # the message ends here, and so must the stream
+         {:ok, stream} <- Serialize.serialize_end(stream) do
       {:ok, stream,
        %{
          bits4: bits4,
@@ -165,7 +171,7 @@ defmodule Serialize.Test.GoldenWire do
          relative_far: relative_far,
          bytes: bytes,
          string: string,
-         wstring: wstring,
+         stones: stones,
          fixed_q8_8: fixed_q8_8,
          fixed_q16_16: fixed_q16_16,
          fixed_q48_16: fixed_q48_16,

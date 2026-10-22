@@ -18,7 +18,7 @@ written by one reads in any other.
 copy of the specification in
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize),
 vendored here beside the implementation and held to the upstream text by
-a CI check.
+a CI check. serialize.elixir 2.x implements **format version 2.0**.
 
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
@@ -34,7 +34,7 @@ Depend on it from git:
 ```elixir
 defp deps do
   [
-    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v1.1.2"}
+    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v2.0.0"}
   ]
 end
 ```
@@ -61,7 +61,11 @@ operation returns `{:ok, stream, value}` or `{:error, stream}`; writer
 contract violations raise `ArgumentError`; hostile bytes refuse as
 values and never raise. A refusal is terminal — the read stream latches
 failed, and every later read on it refuses — and hands back no value at
-all. [USAGE.md](USAGE.md) teaches every operation by example.
+all. Every refusal names its rule from the standard's closed list
+(`:past_end`, `:value_out_of_range`, `:nonzero_padding`, `:trailing_data`,
+`:non_finite_float`, `:invalid_utf8`, `:embedded_nul`, `:non_canonical`),
+and `Serialize.refusal/1` reads the first one. [USAGE.md](USAGE.md)
+teaches every operation by example.
 
 - **Raw bits**: `serialize_bits/3` (1–64 bits in one call — BEAM
   integers are arbitrary precision), `serialize_align/1`.
@@ -71,18 +75,21 @@ all. [USAGE.md](USAGE.md) teaches every operation by example.
   degenerate `min == max` range costs zero bits.
 - **Unsigned helpers and bool**: `serialize_uint8` / `16` / `32` / `64`,
   `serialize_uint128`, `serialize_bool/2`.
-- **Floats**: `serialize_float/2` and `serialize_double/2`, bit
-  transparent both ways — non-finite patterns travel as
-  `{:nonfinite, bits}`, because BEAM float terms cannot be NaN or
-  infinity; `serialize_compressed_float/5`, quantizing in float32 with
-  the standard's two roundings on each side, emulated exactly.
+- **Floats**: `serialize_float/2` and `serialize_double/2`, finite
+  values only and every one bit exact, -0.0 and the subnormals included;
+  a reader refuses NaN and the infinities as `:non_finite_float`.
+  `serialize_compressed_float/5`, quantizing in float32 with the
+  standard's two roundings on each side, emulated exactly, and refusing a
+  decode that is not finite.
 - **Bytes and strings**: `serialize_bytes/3` (aligned bulk copy, count
   agreed, not transmitted); `serialize_string/3` (UTF-8 on the wire,
-  payload validated on read); `serialize_wstring/3` (one 32-bit group
-  per UTF-16 code unit, no alignment anywhere).
+  payload validated on read, handed back byte for byte).
 - **The relative integer**: `serialize_int_relative/3` — the flag ladder
   for strictly increasing sequences over the domain `0` to `2^31 - 1`,
-  one bit for a difference of 1.
+  one bit for a difference of 1, and one encoding per value.
+- **The end**: `serialize_end/1` — a packet reader calls it after the
+  last field of the top-level object, and it refuses trailing bytes and
+  set padding, so one value is always one byte sequence.
 - **Fixed point**: `serialize_fixed/6` — Q formats at 8/16/32/64/128-bit
   storage in one function, the raw scaled integer as an exact ranged
   offset, byte identical to `serialize_int64` wherever storage fits 64
@@ -104,7 +111,9 @@ alias Serialize.{ReadStream, WriteStream}
 
 def serialize(stream, d) do
   with {:ok, stream, x} <- Serialize.serialize_int(stream, d.x, -100, 100),
-       {:ok, stream, flag} <- Serialize.serialize_bool(stream, d.flag) do
+       {:ok, stream, flag} <- Serialize.serialize_bool(stream, d.flag),
+       # the packet ends here, and so must the stream
+       {:ok, stream} <- Serialize.serialize_end(stream) do
     {:ok, stream, %{d | x: x, flag: flag}}
   end
 end
@@ -115,6 +124,10 @@ data = writer |> WriteStream.flush() |> WriteStream.data()
 
 # read: hostile bytes refuse as {:error, stream}, never raise
 {:ok, _reader, decoded} = serialize(ReadStream.new(data), %{x: 0, flag: false})
+
+# a byte more is trailing data, and the refusal says so
+{:error, reader} = serialize(ReadStream.new(data <> <<0>>), %{x: 0, flag: false})
+:trailing_data = Serialize.refusal(reader)
 ```
 
 Writes assume trusted data — caller contract violations raise
@@ -136,6 +149,7 @@ export PATH="$PWD/dist/otp-29.0.5/bin:$PWD/dist/elixir-1.20.4/bin:$PATH"
 
 ```sh
 mix test
+mix test --only controls
 ```
 
 ExUnit alone, no test dependencies. The suite runs the family's shared
@@ -147,23 +161,34 @@ operation the runner cannot drive fails rather than being skipped. Every
 vector goes through this port's reader: an accepted vector must yield its
 value and consume exactly the stated bits, a vector marked `writer =
 canonical` must round trip back through the write stream byte for byte,
-a sequence stating `measure_at_least` must measure at least its floor,
-and a refused vector must refuse, hand back no value, poison every later
-step and leave the stream terminal. Beside it the suite pins the family's golden
-vectors byte for byte — the golden wire message covering every operation
-class, the discriminating compressed-float vectors (bit patterns, not
-tolerances), the string and wide-string pins, every relative-integer
-tier, and the fixed point shapes at every group count — plus
-per-primitive unit suites, refusal proofs for hostile input, terminal
-failure after every class of refusal, and the measure bound.
+a vector carrying `writer_input` must make the writer emit its bytes, a
+sequence stating `measure_at_least` must measure at least its floor, and
+a refused vector must refuse for its stated reason, hand back no value,
+poison every later step and leave the stream terminal with its first
+reason. Beside it the suite pins the family's golden vectors byte for
+byte — the golden wire message covering every operation class, the
+discriminating compressed-float vectors (bit patterns, not tolerances),
+the string pins, every relative-integer tier, and the fixed point shapes
+at every group count — plus per-primitive unit suites, refusal proofs
+for hostile input, terminal failure after every class of refusal, and
+the measure bound.
+
+`mix test --only controls` runs the negative controls, vendored with the
+corpus in [conformance-controls/](conformance-controls): a vector whose
+operation has no runner must go red, and for each refusal rule a reader
+with that one rule deleted, compiled into the VM from a patched copy of
+the source, must fail exactly the vectors the rule's `.expected` list
+names. The surrogate clause of the UTF-8 rule is adapted: this port
+validates with `String.valid?/1`, which has no clause to delete, so its
+sabotage masks every encoded surrogate before validating.
 
 [`interop/`](interop) takes it further: the CI `interop` job builds the
 C++ reference at a pinned release and runs it head to head with this
 port. Both halves write the same boundary message — every operation the
 standard defines, at its boundary values — and the files must be byte
 identical; each then decodes the other's bytes and re-encodes them
-exactly; both must refuse every truncation of the other's stream; and
-both run the corpus. The release candidate in this repository exchanges
+exactly; both must refuse every truncation of the other's stream, and the
+stream one byte longer; and both run the corpus. The release candidate in this repository exchanges
 bytes with the reference on every push, so wire compatibility is
 measured rather than asserted. `mix run interop/interop.exs write
 out.bin` runs one exchange by hand.

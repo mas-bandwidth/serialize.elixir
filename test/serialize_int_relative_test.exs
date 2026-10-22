@@ -42,17 +42,50 @@ defmodule Serialize.IntRelativeTest do
     end
   end
 
+  # six zero flags, then `current` as 32 raw bits: the absolute tier
+  defp absolute_tier(current) do
+    writer = WriteStream.new()
+    {:ok, writer, _} = Serialize.serialize_bits(writer, 0, 6)
+    {:ok, writer, _} = Serialize.serialize_bits(writer, current, 32)
+    WriteStream.data(WriteStream.flush(writer))
+  end
+
+  defp read_relative(data, previous) do
+    case Serialize.serialize_int_relative(ReadStream.new(data), previous, nil) do
+      {:ok, _reader, current} -> {:ok, current}
+      {:error, reader} -> {:error, Serialize.refusal(reader)}
+    end
+  end
+
   test "the final tier transmits current itself and the reader enforces the ordering" do
     # a stream carrying six zero flags then a 32-bit current <= previous
     # must refuse: the absolute form carries no ordering guarantee
-    writer = WriteStream.new()
-    {:ok, writer, _} = Serialize.serialize_bits(writer, 0, 6)
-    {:ok, writer, _} = Serialize.serialize_bits(writer, 100, 32)
-    data = WriteStream.data(WriteStream.flush(writer))
+    data = absolute_tier(100_000)
 
-    assert {:error, _} = Serialize.serialize_int_relative(ReadStream.new(data), 100, nil)
-    assert {:error, _} = Serialize.serialize_int_relative(ReadStream.new(data), 101, nil)
-    {:ok, _reader, 100} = Serialize.serialize_int_relative(ReadStream.new(data), 99, nil)
+    assert read_relative(data, 100_000) == {:error, :value_out_of_range}
+    assert read_relative(data, 100_001) == {:error, :value_out_of_range}
+    assert read_relative(data, 100_000 - 69_915) == {:ok, 100_000}
+  end
+
+  test "the absolute tier is canonical: a difference a bounded tier carries is refused" do
+    data = absolute_tier(100_000)
+
+    # the last bounded difference, and the smallest one: second encodings
+    assert read_relative(data, 100_000 - 69_914) == {:error, :non_canonical}
+    assert read_relative(data, 99_999) == {:error, :non_canonical}
+
+    # the domain comes first: a current past it is out of range whatever
+    # its difference, and the difference is taken on integers that cannot
+    # wrap
+    assert read_relative(absolute_tier(0x80000000), 0x7FFFFFFF) == {:error, :value_out_of_range}
+    assert read_relative(absolute_tier(0xFFFFFFFF), 0x7FFFFFFF) == {:error, :value_out_of_range}
+
+    # and the writer never produces the second encoding: a difference of
+    # 69914 takes the bounded tier, 69915 the absolute one
+    {:ok, writer, _} = Serialize.serialize_int_relative(WriteStream.new(), 0, 69_914)
+    assert Serialize.bits_processed(writer) == 6 + 17
+    {:ok, writer, _} = Serialize.serialize_int_relative(WriteStream.new(), 0, 69_915)
+    assert WriteStream.data(WriteStream.flush(writer)) == absolute_tier(69_915)
   end
 
   test "a tier payload outside its band refuses" do
@@ -62,17 +95,17 @@ defmodule Serialize.IntRelativeTest do
     {:ok, writer, _} = Serialize.serialize_bits(writer, 0b10, 2)
     {:ok, writer, _} = Serialize.serialize_bits(writer, 0b111, 3)
     data = WriteStream.data(WriteStream.flush(writer))
-    assert {:error, _} = Serialize.serialize_int_relative(ReadStream.new(data), 100, nil)
+    assert read_relative(data, 100) == {:error, :value_out_of_range}
   end
 
   test "truncated streams refuse at every stage of the ladder" do
-    assert {:error, _} = Serialize.serialize_int_relative(ReadStream.new(<<>>), 100, nil)
+    assert read_relative(<<>>, 100) == {:error, :past_end}
 
     # six zero flags then nothing: the 32-bit read refuses
     writer = WriteStream.new()
     {:ok, writer, _} = Serialize.serialize_bits(writer, 0, 6)
     data = WriteStream.data(WriteStream.flush(writer))
-    assert {:error, _} = Serialize.serialize_int_relative(ReadStream.new(data), 100, nil)
+    assert read_relative(data, 100) == {:error, :past_end}
   end
 
   test "the semantics are pinned: positive only, strictly increasing, no wrapping" do
@@ -122,8 +155,7 @@ defmodule Serialize.IntRelativeTest do
           # is outside the domain, not a negative value
           {<<0x00, 0x00, 0x00, 0x00, 0x20>>, 100}
         ] do
-      assert {:error, _} =
-               Serialize.serialize_int_relative(ReadStream.new(bytes), previous, nil),
+      assert read_relative(bytes, previous) == {:error, :value_out_of_range},
              "expected a refusal for #{inspect(bytes)} after #{previous}"
     end
   end

@@ -12,7 +12,8 @@ defmodule Serialize do
     * `{:ok, stream, value}` — the advanced stream, and the value written
       (echoed) or read (decoded);
     * `{:ok, stream}` — for `serialize_align/1`;
-    * `{:error, stream}` — a read refusal, the reference's `false` return.
+    * `{:error, stream}` — a read refusal, the reference's `false` return;
+      `refusal/1` names the rule that refused it.
 
   Writes assume trusted data: caller contract violations raise
   `ArgumentError`, this implementation's misuse convention. Reads validate
@@ -25,14 +26,21 @@ defmodule Serialize do
   failed, and every later read on it refuses without consuming bits. See
   `Serialize.ReadStream`.
 
+  Every refusal names its rule from STANDARD.md's closed list — `:past_end`,
+  `:value_out_of_range`, `:nonzero_padding`, `:trailing_data`,
+  `:non_finite_float`, `:invalid_utf8`, `:embedded_nul` and `:non_canonical`
+  — and the stream keeps the first one: `refusal/1` reads it.
+
   Compose messages with plain function calls (`with` chains); the
   reference's `serialize_object` is composition, contributes no bytes, and
-  needs no operation here.
+  needs no operation here. A packet reader ends the top-level object with
+  `serialize_end/1`, which refuses trailing bytes and set padding, so one
+  value has exactly one byte sequence.
 
-  Non-finite floating point values cannot exist as BEAM float terms, so the
-  bit-transparent `serialize_float/2` and `serialize_double/2` carry them
-  as `{:nonfinite, bits}` — the exact IEEE-754 pattern, preserved through a
-  round trip. See `Serialize.Float32`.
+  The wire carries finite floats only, and BEAM float terms are always
+  finite: `serialize_float/2` and `serialize_double/2` take and return plain
+  floats, and a reader refuses a NaN or infinity pattern as
+  `:non_finite_float`. See `Serialize.Float32`.
   """
 
   import Bitwise
@@ -233,13 +241,19 @@ defmodule Serialize do
 
   @doc """
   Serializes the 32 bits of an IEEE-754 single-precision value as one
-  32-bit group — bit-transparent in both directions. A non-finite pattern
-  travels as `{:nonfinite, bits}` (see `Serialize.Float32`).
+  32-bit group. Finite values only, each one bit exact, -0.0 and the
+  subnormals included: the reader tests the raw bits and refuses NaN and
+  the infinities as `:non_finite_float`, and a writer handed a double that
+  narrows past float32 raises.
   """
   @spec serialize_float(stream, Float32.value()) :: result(Float32.value())
   def serialize_float(%ReadStream{} = stream, _value) do
     with {:ok, stream, pattern} <- ReadStream.serialize_bits(stream, 0, 32) do
-      {:ok, stream, Float32.value32(pattern)}
+      if not Float32.finite32?(pattern) do
+        refuse(stream, :non_finite_float)
+      else
+        {:ok, stream, Float32.value32(pattern)}
+      end
     end
   end
 
@@ -250,13 +264,18 @@ defmodule Serialize do
 
   @doc """
   Serializes the 64 bits of an IEEE-754 double-precision value as one
-  64-bit group — bit-transparent in both directions. A non-finite pattern
-  travels as `{:nonfinite, bits}`.
+  64-bit group, low 32 bits first. Finite values only, each one bit exact:
+  the reader tests the raw bits and refuses NaN and the infinities as
+  `:non_finite_float`.
   """
   @spec serialize_double(stream, Float32.value()) :: result(Float32.value())
   def serialize_double(%ReadStream{} = stream, _value) do
     with {:ok, stream, pattern} <- serialize_bits(stream, 0, 64) do
-      {:ok, stream, Float32.value64(pattern)}
+      if not Float32.finite64?(pattern) do
+        refuse(stream, :non_finite_float)
+      else
+        {:ok, stream, Float32.value64(pattern)}
+      end
     end
   end
 
@@ -269,9 +288,12 @@ defmodule Serialize do
   Serializes a float quantized to a resolution over `[min, max]`
   (STANDARD.md "compressed_float"). The quantization arithmetic is float32
   with two roundings on each side, emulated exactly; the declaration must
-  be finite in float32 and writing a non-finite value is non-conforming —
-  both raise. The reader rejects an integer above the step count. Lossy by
-  construction: a round trip returns the nearest representable quantum.
+  be finite in float32, top decode (`min + delta`) included, and writing a
+  non-finite value is non-conforming — both raise on the write path. The
+  reader refuses an integer above the step count as `:value_out_of_range`
+  and a decode that is not finite as `:non_finite_float`, whatever the
+  declaration. Lossy by construction: a round trip returns the nearest
+  representable quantum.
   """
   @spec serialize_compressed_float(stream, number, number, number, number) :: result(float)
   def serialize_compressed_float(stream, value, min, max, res) do
@@ -283,6 +305,14 @@ defmodule Serialize do
           raise ArgumentError, "serialize_compressed_float value must be a finite number"
         end
 
+        # the declaration's top decode must be finite: checked where the
+        # declaration is used to write, never on read, where the decode
+        # refuses instead
+        unless is_float(compressed_float_decode(miv, miv, delta, min32)) do
+          raise ArgumentError,
+                "serialize_compressed_float declaration decodes its top integer to an infinity"
+        end
+
         compressed_float_quantize(value, min32, delta, miv)
       else
         0
@@ -290,12 +320,24 @@ defmodule Serialize do
 
     with {:ok, stream, integer_value} <- serialize_bits(stream, integer_value, bits) do
       cond do
-        not reading?(stream) -> {:ok, stream, value}
-        integer_value > miv -> refuse(stream)
-        true -> {:ok, stream, compressed_float_decode(integer_value, miv, delta, min32)}
+        not reading?(stream) ->
+          {:ok, stream, value}
+
+        integer_value > miv ->
+          refuse(stream, :value_out_of_range)
+
+        true ->
+          read_compressed_float(stream, compressed_float_decode(integer_value, miv, delta, min32))
       end
     end
   end
+
+  # every operand is finite and the integer is in range, and still the
+  # final add can round past FLT_MAX: a non-finite decode is refused
+  defp read_compressed_float(stream, decoded) when not is_float(decoded),
+    do: refuse(stream, :non_finite_float)
+
+  defp read_compressed_float(stream, decoded), do: {:ok, stream, decoded}
 
   # Derives the wire constants from a declaration, mirroring
   # serialize_compressed_float_params: every step float32, the parameters
@@ -366,13 +408,10 @@ defmodule Serialize do
     quotient = Float32.round32!(Float32.round32!(integer * 1.0) / Float32.round32!(miv * 1.0))
     scaled = Float32.round32!(quotient * delta)
 
-    # the final add cannot overflow for a conforming declaration; the
-    # non-finite mapping keeps the never-raise reader obligation airtight
-    case Float32.round32(scaled + min32) do
-      :pos_inf -> {:nonfinite, 0x7F800000}
-      :neg_inf -> {:nonfinite, 0xFF800000}
-      value -> value
-    end
+    # the final add can round past FLT_MAX for a non-conforming
+    # declaration: an infinity comes back as :pos_inf or :neg_inf, never
+    # raised, and the caller refuses it
+    Float32.round32(scaled + min32)
   end
 
   # ------------------------------------------------------------------
@@ -386,6 +425,10 @@ defmodule Serialize do
   # operation rather than of the caller's storage type
   @relative_max 0x7FFFFFFF
 
+  # the largest difference a bounded tier carries: the absolute tier holding
+  # a difference this small is a second encoding of the value
+  @relative_bounded_max 69_914
+
   @doc """
   Serializes `current` relative to `previous`, where `current > previous`
   (STANDARD.md "int_relative"): a ladder of one-bit flags with a payload
@@ -396,10 +439,13 @@ defmodule Serialize do
   `current` lie in it. `previous` is caller state and never arrives off the
   wire, so one outside the domain is caller error: the guard rejects it.
   The reader reconstructs `current` on BEAM integers, which cannot wrap at
-  any width, then refuses the read unless the result lies in the domain and
-  is strictly greater than `previous` — in the one-bit tier, in each of the
-  five bounded tiers, and in the absolute tier alike. Positive only,
-  strictly increasing, no wrapping.
+  any width, then refuses the read as `:value_out_of_range` unless the
+  result lies in the domain and is strictly greater than `previous` — in
+  the one-bit tier, in each of the five bounded tiers, and in the absolute
+  tier alike. Positive only, strictly increasing, no wrapping. The absolute
+  tier is canonical too: carrying a difference of 69914 or less, which a
+  bounded tier would have taken, it is refused as `:non_canonical`, after
+  the domain rule.
   """
   @spec serialize_int_relative(stream, 0..0x7FFFFFFF, 0..0x7FFFFFFF | nil) ::
           result(non_neg_integer)
@@ -418,7 +464,7 @@ defmodule Serialize do
 
     with {:ok, stream, one_bit} <- serialize_bool(stream, writing?(stream) and difference == 1) do
       if one_bit do
-        relative_result(stream, previous, previous + 1, current)
+        relative_result(stream, previous, previous + 1, current, :bounded)
       else
         relative_tiers(stream, previous, current, difference, @relative_tiers)
       end
@@ -431,7 +477,7 @@ defmodule Serialize do
         payload = if writing?(stream), do: difference, else: lo
 
         with {:ok, stream, d} <- serialize_int(stream, payload, lo, hi) do
-          relative_result(stream, previous, previous + d, current)
+          relative_result(stream, previous, previous + d, current, :bounded)
         end
       else
         relative_tiers(stream, previous, current, difference, rest)
@@ -448,19 +494,31 @@ defmodule Serialize do
     payload = if writing?(stream), do: current, else: 0
 
     with {:ok, stream, value} <- serialize_bits(stream, payload, 32) do
-      relative_result(stream, previous, value, current)
+      relative_result(stream, previous, value, current, :absolute)
     end
   end
 
   # The reconstruction check every tier owes: `reconstructed` is computed on
   # arbitrary precision BEAM integers, so it cannot wrap, and the read is
-  # refused unless it lies in the domain and above `previous`.
-  defp relative_result(stream, previous, reconstructed, current) do
+  # refused unless it lies in the domain and above `previous`. Then the
+  # absolute tier's canonical rule: the domain comes first, so a value
+  # outside it is out of range whatever its difference.
+  defp relative_result(stream, previous, reconstructed, current, tier) do
     cond do
-      not reading?(stream) -> {:ok, stream, current}
-      reconstructed > @relative_max -> refuse(stream)
-      reconstructed <= previous -> refuse(stream)
-      true -> {:ok, stream, reconstructed}
+      not reading?(stream) ->
+        {:ok, stream, current}
+
+      reconstructed > @relative_max ->
+        refuse(stream, :value_out_of_range)
+
+      reconstructed <= previous ->
+        refuse(stream, :value_out_of_range)
+
+      tier == :absolute and reconstructed - previous <= @relative_bounded_max ->
+        refuse(stream, :non_canonical)
+
+      true ->
+        {:ok, stream, reconstructed}
     end
   end
 
@@ -556,7 +614,11 @@ defmodule Serialize do
   `serialize_int(length, 0, buffer_size - 1)`, then the bytes via the
   aligning bytes operation. The payload is well-formed UTF-8 with no
   interior NUL by writer contract — unchecked on write, per the trusted
-  writes doctrine — and the reader refuses a payload violating either rule.
+  writes doctrine — and the reader refuses a payload violating either rule:
+  a length past the buffer as `:value_out_of_range`, a zero byte as
+  `:embedded_nul`, then malformed UTF-8 as `:invalid_utf8`. An accepted
+  payload comes back exactly as read: no normalization, no replacement and
+  no stripped byte order mark.
   """
   @spec serialize_string(stream, String.t() | nil, pos_integer) :: result(String.t())
   def serialize_string(stream, value, buffer_size)
@@ -579,8 +641,8 @@ defmodule Serialize do
         # UTF-8 validation. NUL is valid UTF-8, which is why it is its own
         # rule: a zero byte gives the payload two lengths.
         cond do
-          :binary.match(payload, <<0>>) != :nomatch -> refuse(stream)
-          not String.valid?(payload) -> refuse(stream)
+          :binary.match(payload, <<0>>) != :nomatch -> refuse(stream, :embedded_nul)
+          not String.valid?(payload) -> refuse(stream, :invalid_utf8)
           true -> {:ok, stream, payload}
         end
       else
@@ -589,102 +651,23 @@ defmodule Serialize do
     end
   end
 
+  # ------------------------------------------------------------------
+  # end
+  # ------------------------------------------------------------------
+
   @doc """
-  Serializes a wide string (STANDARD.md "wstring"): the length in UTF-16
-  code units as `serialize_int(length, 0, buffer_size - 1)`, then each code
-  unit as a 32-bit group — no alignment anywhere in the operation. An
-  astral code point travels as its surrogate pair. The reader refuses a
-  group above 0xFFFF, an interior NUL group and any unpaired surrogate.
+  Serializes the end of the object (STANDARD.md "end"): a packet reader
+  calls it after the last field of the top-level object. A writer's end
+  emits nothing and a measure's costs nothing. A reader's end refuses a
+  whole byte or more after the object as `:trailing_data` — checked first —
+  and a set bit among the final byte's unused bits as `:nonzero_padding`,
+  then consumes that padding, so an accepted end leaves the stream exactly
+  consumed. On a failed stream it refuses with the first refusal's reason.
   """
-  @spec serialize_wstring(stream, String.t() | nil, pos_integer) :: result(String.t())
-  def serialize_wstring(stream, value, buffer_size)
-      when is_integer(buffer_size) and buffer_size >= 1 and buffer_size <= @int32_max do
-    units =
-      if writing?(stream) do
-        unless is_binary(value) do
-          raise ArgumentError, "serialize_wstring value must be a string"
-        end
-
-        units = utf16_units(value)
-
-        unless length(units) < buffer_size do
-          raise ArgumentError, "serialize_wstring value does not fit buffer_size #{buffer_size}"
-        end
-
-        units
-      else
-        []
-      end
-
-    with {:ok, stream, length} <- serialize_int(stream, length(units), 0, buffer_size - 1) do
-      if reading?(stream) do
-        read_wstring(stream, length, nil, [])
-      else
-        case write_wstring_units(stream, units) do
-          {:ok, stream} -> {:ok, stream, value}
-          error -> error
-        end
-      end
-    end
-  end
-
-  defp utf16_units(value) do
-    encoded = :unicode.characters_to_binary(value, :utf8, {:utf16, :little})
-
-    unless is_binary(encoded) do
-      raise ArgumentError, "serialize_wstring value is not valid UTF-8"
-    end
-
-    for <<unit::little-16 <- encoded>>, do: unit
-  end
-
-  defp write_wstring_units(stream, []), do: {:ok, stream}
-
-  defp write_wstring_units(stream, [unit | rest]) do
-    with {:ok, stream, _unit} <- serialize_bits(stream, unit, 32) do
-      write_wstring_units(stream, rest)
-    end
-  end
-
-  # The read loop, refusal for refusal the reference's: a group above
-  # 0xFFFF is not a UTF-16 code unit; a zero group is the two-lengths
-  # smuggling primitive; a high surrogate demands its low, a low demands a
-  # preceding high, and a dangling high as the final group fails. Pairs
-  # recombine into the code point at the boundary.
-  defp read_wstring(stream, 0, nil, acc) do
-    {:ok, stream, acc |> Enum.reverse() |> List.to_string()}
-  end
-
-  defp read_wstring(stream, 0, _pending, _acc), do: refuse(stream)
-
-  defp read_wstring(stream, remaining, pending, acc) do
-    with {:ok, stream, unit} <- serialize_bits(stream, 0, 32) do
-      cond do
-        unit > 0xFFFF ->
-          refuse(stream)
-
-        unit == 0 ->
-          refuse(stream)
-
-        pending != nil ->
-          if unit >= 0xDC00 and unit <= 0xDFFF do
-            code_point = 0x10000 + ((pending - 0xD800) <<< 10) + (unit - 0xDC00)
-            read_wstring(stream, remaining - 1, nil, [code_point | acc])
-          else
-            refuse(stream)
-          end
-
-        unit >= 0xDC00 and unit <= 0xDFFF ->
-          refuse(stream)
-
-        unit >= 0xD800 and unit <= 0xDBFF ->
-          read_wstring(stream, remaining - 1, unit, acc)
-
-        true ->
-          read_wstring(stream, remaining - 1, nil, [unit | acc])
-      end
-    end
-  end
+  @spec serialize_end(stream) :: {:ok, stream} | {:error, stream}
+  def serialize_end(%WriteStream{} = stream), do: WriteStream.serialize_end(stream)
+  def serialize_end(%ReadStream{} = stream), do: ReadStream.serialize_end(stream)
+  def serialize_end(%MeasureStream{} = stream), do: MeasureStream.serialize_end(stream)
 
   # ------------------------------------------------------------------
   # stream accessors
@@ -697,6 +680,13 @@ defmodule Serialize do
   @doc "The number of bytes processed so far: the bit count rounded up."
   @spec bytes_processed(stream) :: non_neg_integer
   def bytes_processed(stream), do: smod(stream).bytes_processed(stream)
+
+  @doc """
+  The first refusal's reason on a read stream — one of
+  `Serialize.ReadStream.refusals/0` — or `nil` while no read has failed.
+  """
+  @spec refusal(ReadStream.t()) :: ReadStream.refusal() | nil
+  def refusal(%ReadStream{} = stream), do: ReadStream.refusal(stream)
 
   @doc "The pad bits an align would cost now: exact on write and read, 7 on measure."
   @spec align_bits(stream) :: 0..7
@@ -714,13 +704,14 @@ defmodule Serialize do
   defp smod(%ReadStream{}), do: ReadStream
   defp smod(%MeasureStream{}), do: MeasureStream
 
-  # A refusal decided above the stream primitives — an out-of-range
-  # compressed float or fixed offset, a malformed string or wide string, an
-  # int_relative reconstruction outside the domain. Failure is terminal, so
-  # the refusal latches the stream the way the primitives' own do. The
-  # ReadStream pattern is load bearing: a refusal can only be decided while
-  # reading, and a miss crashes here rather than skipping the latch.
-  defp refuse(%ReadStream{} = stream), do: {:error, ReadStream.fail(stream)}
+  # A refusal decided above the stream primitives — a non-finite float, an
+  # out-of-range or non-finite compressed float, a malformed string, an
+  # int_relative reconstruction outside the domain or in a non-canonical
+  # tier. Failure is terminal, so the refusal latches the stream, with its
+  # reason, the way the primitives' own do. The ReadStream pattern is load
+  # bearing: a refusal can only be decided while reading, and a miss crashes
+  # here rather than skipping the latch.
+  defp refuse(%ReadStream{} = stream, reason), do: {:error, ReadStream.fail(stream, reason)}
 
   defp writing?(%ReadStream{}), do: false
   defp writing?(_stream), do: true

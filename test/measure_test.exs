@@ -52,10 +52,13 @@ defmodule Serialize.MeasureTest do
     {:ok, measure, _} = Serialize.serialize_float(measure, 1.0)
     {:ok, measure, _} = Serialize.serialize_double(measure, 1.0)
     {:ok, measure, _} = Serialize.serialize_string(measure, "abc", 8)
-    {:ok, measure, _} = Serialize.serialize_wstring(measure, "abc", 8)
     {:ok, measure, _} = Serialize.serialize_bytes(measure, <<1>>, 1)
     {:ok, measure, _} = Serialize.serialize_int_relative(measure, 1, 2)
     {:ok, measure, _} = Serialize.serialize_fixed(measure, 0, 16, 16, -1, 1)
+    before = Serialize.bits_processed(measure)
+    # the end costs nothing
+    {:ok, measure} = Serialize.serialize_end(measure)
+    assert Serialize.bits_processed(measure) == before
     assert Serialize.bits_processed(measure) > 0
     assert Serialize.bytes_processed(measure) == div(Serialize.bits_processed(measure) + 7, 8)
   end

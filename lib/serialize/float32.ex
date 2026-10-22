@@ -2,13 +2,13 @@ defmodule Serialize.Float32 do
   @moduledoc """
   IEEE-754 arithmetic and bit-pattern conversion pinned to the wire's terms.
 
-  BEAM float terms are always finite doubles: NaN and the infinities do not
-  exist as terms, and bit-syntax float matching fails on their patterns. The
-  wire's `float` and `double` operations are bit-transparent in both
-  directions (STANDARD.md "Floating Point"), so this module converts through
-  raw integer bit patterns and represents a non-finite pattern as
-  `{:nonfinite, bits}` — the exact transmitted pattern, preserved so a round
-  trip through this implementation reproduces all 32 (or 64) bits.
+  The wire's `float` and `double` carry finite values only (STANDARD.md
+  "Finite values only, every one bit exact"), and BEAM float terms are
+  exactly that: always finite doubles, never NaN or an infinity. So a value
+  here is a plain float, converted through its raw integer bit pattern so
+  -0.0 and the subnormals keep every bit. The read path tests the raw bits
+  with `finite32?/1` and `finite64?/1` before converting — a non-finite
+  pattern is refused, never converted.
 
   `compressed_float` requires exact float32 arithmetic with every step
   rounding (STANDARD.md "compressed_float"). `round32/1` rounds a double to
@@ -20,19 +20,17 @@ defmodule Serialize.Float32 do
 
   import Bitwise
 
-  @typedoc """
-  A value of the bit-transparent float operations: a finite float, or a
-  non-finite IEEE-754 bit pattern carried verbatim as `{:nonfinite, bits}`.
-  """
-  @type value :: float | {:nonfinite, non_neg_integer}
+  @typedoc "A value of the float operations: a finite float."
+  @type value :: float
 
   @doc """
   The 32-bit IEEE-754 pattern of a float value, for the write path.
 
   A float rounds to float32 first (the reference's `float` parameter type
-  performs the same conversion at the call boundary); a float too large in
-  magnitude for float32 is a caller error and raises. A `{:nonfinite, bits}`
-  value passes its pattern through verbatim.
+  performs the same conversion at the call boundary), and the check runs
+  after that narrowing: a finite double too large in magnitude for float32
+  narrows to an infinity, which the wire does not carry, so it is a caller
+  error and raises.
   """
   @spec bits32(value) :: non_neg_integer
   def bits32(value) when is_float(value) do
@@ -41,33 +39,22 @@ defmodule Serialize.Float32 do
     if finite32?(bits) do
       bits
     else
-      raise ArgumentError,
-            "float #{value} overflows float32; pass {:nonfinite, bits} to write a non-finite pattern"
+      raise ArgumentError, "float #{value} overflows float32: the wire carries finite values only"
     end
-  end
-
-  def bits32({:nonfinite, bits})
-      when is_integer(bits) and bits >= 0 and bits <= 0xFFFFFFFF do
-    if finite32?(bits) do
-      raise ArgumentError, "{:nonfinite, bits} carries a finite float32 pattern; pass the float"
-    end
-
-    bits
   end
 
   @doc """
-  The value of a 32-bit IEEE-754 pattern, for the read path: the float for
-  a finite pattern, `{:nonfinite, bits}` otherwise. Never raises — the bits
-  come from untrusted data.
+  The value of a finite 32-bit IEEE-754 pattern, for the read path. The
+  caller has already refused a non-finite pattern; handing one here raises.
   """
   @spec value32(non_neg_integer) :: value
   def value32(bits) when is_integer(bits) and bits >= 0 and bits <= 0xFFFFFFFF do
-    if finite32?(bits) do
-      <<value::float-32-little>> = <<bits::little-32>>
-      value
-    else
-      {:nonfinite, bits}
+    unless finite32?(bits) do
+      raise ArgumentError, "0x#{Integer.to_string(bits, 16)} is not a finite float32 pattern"
     end
+
+    <<value::float-32-little>> = <<bits::little-32>>
+    value
   end
 
   @doc "The 64-bit IEEE-754 pattern of a double value, for the write path."
@@ -77,27 +64,18 @@ defmodule Serialize.Float32 do
     bits
   end
 
-  def bits64({:nonfinite, bits})
-      when is_integer(bits) and bits >= 0 and bits <= 0xFFFFFFFFFFFFFFFF do
-    if finite64?(bits) do
-      raise ArgumentError, "{:nonfinite, bits} carries a finite float64 pattern; pass the float"
-    end
-
-    bits
-  end
-
   @doc """
-  The value of a 64-bit IEEE-754 pattern, for the read path: the float for
-  a finite pattern, `{:nonfinite, bits}` otherwise. Never raises.
+  The value of a finite 64-bit IEEE-754 pattern, for the read path. The
+  caller has already refused a non-finite pattern; handing one here raises.
   """
   @spec value64(non_neg_integer) :: value
   def value64(bits) when is_integer(bits) and bits >= 0 and bits <= 0xFFFFFFFFFFFFFFFF do
-    if finite64?(bits) do
-      <<value::float-64-little>> = <<bits::little-64>>
-      value
-    else
-      {:nonfinite, bits}
+    unless finite64?(bits) do
+      raise ArgumentError, "0x#{Integer.to_string(bits, 16)} is not a finite float64 pattern"
     end
+
+    <<value::float-64-little>> = <<bits::little-64>>
+    value
   end
 
   @doc "Whether a 32-bit pattern encodes a finite float32."
