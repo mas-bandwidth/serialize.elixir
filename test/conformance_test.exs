@@ -3,9 +3,8 @@ defmodule Serialize.ConformanceTest do
   The shared conformance corpus, run through this port's reader, writer and
   measure.
 
-  STANDARD.md, Provenance: "Every implementation vendors and syncs that
-  directory the way it vendors this document, and its test suite must run
-  every vector in it." The corpus is the instrument the standard names, and
+  STANDARD.md, "The conformance corpus": "A runner discovers the directory
+  and runs every vector in it." The corpus is the instrument the standard names, and
   the obligations it states are the ones this module meets:
 
     * The directory is **discovered**, never named file by file. An empty

@@ -15,9 +15,8 @@ defmodule Serialize.ConformanceRunner do
 
   alias Serialize.{ConformanceVectors, Float32, MeasureStream, ReadStream, WriteStream}
 
-  # The buffer contract, STANDARD.md "Past-end memory is an implementation
-  # contract": every stream is presented with the slack its port's contract
-  # requires, filled with a non-zero pattern so a decode that depends on
+  # The buffer contract, STANDARD.md "The conformance corpus": every stream
+  # is presented with the slack its port's contract requires, filled with a non-zero pattern so a decode that depends on
   # memory past the end cannot pass by reading zeros. This port's streams
   # are BEAM binaries whose length is the stream's length, so the slack it
   # requires of a caller is zero bytes -- and to make the requirement
@@ -166,9 +165,9 @@ defmodule Serialize.ConformanceRunner do
     end
   end
 
-  # STANDARD.md, Reader Obligations: "issue a further read on the same
-  # stream and require that it also fails, consumes no bits, and writes
-  # nothing to its own destination." The read is one this vector does not
+  # STANDARD.md, "What a runner checks": for a refused vector, the stream
+  # terminal, "a further read on the same stream also fails, consumes no
+  # bits and writes nothing". The read is one this vector does not
   # name, so the check reaches every refusal and not only the sequences.
   defp assert_terminal(vector, stream) do
     before = Serialize.bits_processed(stream)

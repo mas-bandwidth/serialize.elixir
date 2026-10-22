@@ -91,11 +91,10 @@ defmodule Serialize.TerminalTest do
   end
 
   test "a zero-bit read refuses on a failed stream, at every operation that has one" do
-    # STANDARD.md, Reader Obligations: "Every read consults the failure
-    # state before it does anything else, zero-bit reads included, so a
-    # degenerate ranged read, an align on an already aligned stream, a
-    # bytes call of zero count and object all refuse on a stream that has
-    # already failed." Each read below consumes nothing and would
+    # STANDARD.md, Reader Obligations, "Failure is terminal": every later
+    # read is refused, "zero-bit reads included: a degenerate ranged field,
+    # an align on an aligned stream, a `bytes` of zero count, an `object`,
+    # and an `end`." Each read below consumes nothing and would
     # otherwise always succeed, which is what a reader treating "consumes
     # no bits" as "cannot fail" gets wrong.
     {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)

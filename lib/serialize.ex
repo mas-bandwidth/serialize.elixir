@@ -11,7 +11,7 @@ defmodule Serialize do
 
     * `{:ok, stream, value}` — the advanced stream, and the value written
       (echoed) or read (decoded);
-    * `{:ok, stream}` — for `serialize_align/1`;
+    * `{:ok, stream}` — for `serialize_align/1` and `serialize_end/1`;
     * `{:error, stream}` — a read refusal, the reference's `false` return;
       `refusal/1` names the rule that refused it.
 

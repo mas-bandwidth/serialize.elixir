@@ -94,7 +94,7 @@ Serialize.refusal(reader) # :value_out_of_range
 
 ## Writes trust, reads validate
 
-The check model is the family standard's ("Writes assume trusted data"):
+The check model is the family standard's ("Writers are trusted; readers are not"):
 **the caller is responsible for well-formed writes**, and reads validate
 everything, because the wire is a trust boundary.
 

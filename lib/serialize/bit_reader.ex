@@ -6,8 +6,8 @@ defmodule Serialize.BitReader do
   shifts by the bit remainder — the reference's branchless window model,
   with the window priced inside the binary: bytes past the end of the data
   are never loaded and never interpreted, so callers owe no allocation
-  slack beyond the data itself (STANDARD.md "Past-end memory is an
-  implementation contract"). The window is 40 bits — enough for a 7-bit
+  slack beyond the data itself (STANDARD.md "The conformance corpus": the
+  slack a harness presents is the implementation's buffer contract). The window is 40 bits — enough for a 7-bit
   offset plus a 32-bit field, and small enough that the decoded value never
   leaves the BEAM's small-integer range. Reads share the underlying binary;
   nothing is copied.
