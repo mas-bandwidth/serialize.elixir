@@ -81,7 +81,13 @@ defmodule Serialize.BitsOpTest do
 
     assert_raise FunctionClauseError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 0) end
     assert_raise FunctionClauseError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 65) end
-    assert_raise ArgumentError, fn -> Serialize.serialize_bool(WriteStream.new(), 1) end
+    # the misuse is a runtime value: a literal would be refused by the
+    # compiler's type check before the library's own check could run
+    not_a_boolean = :erlang.binary_to_term(:erlang.term_to_binary(1))
+
+    assert_raise ArgumentError, fn ->
+      Serialize.serialize_bool(WriteStream.new(), not_a_boolean)
+    end
   end
 
   test "measure charges the exact width" do

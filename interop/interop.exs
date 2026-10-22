@@ -12,19 +12,21 @@ defmodule Serialize.Interop do
       mix run interop/interop.exs read   <file>
       mix run interop/interop.exs refuse <file>
 
+  `refuse` requires every proper prefix of the other half's bytes to be
+  refused, and the bytes with one zero byte more too: that is trailing data,
+  which the end after the last field refuses.
+
   THE MESSAGE is the boundary set: every operation STANDARD.md defines, at the
   values where implementations disagree. Zero bit ranges on all three ranged
   widths and on fixed point; the domain edges of int, int64, int128 and
   int_relative; the maximum widths of bits, uint128 and the four group fixed
   point path; both sides of the alignment rule, including the align inside a zero
-  length bytes; empty and full strings; and the wide string cases the surrogate
-  rule governs, up to the largest code unit.
+  length bytes; empty, full and multi-byte strings; the float and double edges,
+  -0 and the subnormals included; and the end, after the last field.
 
-  WHAT IT DELIBERATELY DOES NOT CARRY: a NaN payload. STANDARD.md's bit
-  transparency claim covers it, but a NaN's payload bits do not survive every
-  language's float type on the way to the wire, so a difference here would say
-  nothing about the wire format. This port pins its own NaN patterns in its own
-  suite, where the claim can be tested honestly.
+  WHAT IT DOES NOT CARRY: NaN and the infinities. Format 2.0 carries finite
+  floats only, and a writer is never handed one; the refusal of each non-finite
+  pattern is pinned by the shared corpus, which both halves run.
 
   The sequence is one ordered list of steps. Each step carries the value the
   write side sends, the operation, and how a decoded value is compared; the read
@@ -149,10 +151,10 @@ defmodule Serialize.Interop do
     0x00000000,
     # -0
     0x80000000,
-    # +infinity
-    0x7F800000,
-    # -infinity
-    0xFF800000,
+    # the most negative finite float32
+    0xFF7FFFFF,
+    # the largest negative subnormal
+    0x807FFFFF,
     # the largest finite float32
     0x7F7FFFFF,
     # the smallest normal
@@ -170,10 +172,10 @@ defmodule Serialize.Interop do
     0x0000000000000000,
     # -0
     0x8000000000000000,
-    # +infinity
-    0x7FF0000000000000,
-    # -infinity
-    0xFFF0000000000000,
+    # the most negative finite float64
+    0xFFEFFFFFFFFFFFFF,
+    # the largest negative subnormal
+    0x800FFFFFFFFFFFFF,
     # the largest finite float64
     0x7FEFFFFFFFFFFFFF,
     # the smallest normal
@@ -225,22 +227,6 @@ defmodule Serialize.Interop do
     # six UTF-8 bytes, as explicit code points so no source file encoding can
     # reach the wire
     "\u{43C}\u{438}\u{440}"
-  ]
-
-  @wstring_buffer_size 8
-  @wide_strings [
-    # empty
-    "",
-    # basic plane
-    "\u{43C}\u{438}\u{440}",
-    # the first code unit above the surrogate block
-    "\u{E000}",
-    # the largest code unit there is
-    "\u{FFFF}",
-    # U+1F600 as its surrogate pair: four code units
-    "A\u{1F600}B",
-    # seven code units, the most buffer size 8 carries
-    "abcdefg"
   ]
 
   # --------------------------------------------------------------------------
@@ -374,15 +360,25 @@ defmodule Serialize.Interop do
       for value <- @strings do
         step("string", value, &Serialize.serialize_string(&1, &2, @string_buffer_size))
       end,
-      # wstring: empty, basic plane, the code unit boundaries, a pair, full
-      for value <- @wide_strings do
-        step("wstring", value, &Serialize.serialize_wstring(&1, &2, @wstring_buffer_size))
-      end
+      # the end: the message ends here, and so must the stream
+      end_step()
     ])
   end
 
   defp step(label, value, op, check \\ :exact) do
     %{label: label, value: value, op: op, check: check}
+  end
+
+  # end returns `{:ok, stream}` and decodes to nothing, like align
+  defp end_step do
+    op = fn stream, _value ->
+      case Serialize.serialize_end(stream) do
+        {:ok, stream} -> {:ok, stream, :ended}
+        {:error, stream} -> {:error, stream}
+      end
+    end
+
+    step("end", :ended, op, :any)
   end
 
   # align returns `{:ok, stream}` and decodes to nothing; it is wrapped so one
@@ -501,7 +497,8 @@ defmodule Serialize.Interop do
   end
 
   # The hostile half: every proper prefix of a valid stream is a truncated
-  # stream, and a conforming reader refuses every one of them without raising.
+  # stream, and a conforming reader refuses every one of them without raising;
+  # the stream with a zero byte more is trailing data, which the end refuses.
   defp refuse(path) do
     input = File.read!(path)
     plan = steps()
@@ -528,7 +525,23 @@ defmodule Serialize.Interop do
       end
     end)
 
-    IO.puts("interop elixir: refused all #{byte_size(input)} truncated prefixes of #{path}")
+    case serialize(ReadStream.new(input <> <<0>>), plan) do
+      {:error, stream} ->
+        if Serialize.refusal(stream) != :trailing_data do
+          die(
+            "interop elixir refuse: #{path} with a zero byte more was refused as " <>
+              "#{inspect(Serialize.refusal(stream))}, not trailing_data"
+          )
+        end
+
+      {:ok, _stream, _decoded} ->
+        die("interop elixir refuse: #{path} with a zero byte more was ACCEPTED")
+    end
+
+    IO.puts(
+      "interop elixir: refused all #{byte_size(input)} truncated prefixes of #{path}, " <>
+        "and the stream one byte longer"
+    )
   end
 
   defp die(message) do

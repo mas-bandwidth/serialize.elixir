@@ -3,6 +3,8 @@ defmodule Serialize.BytesStringTest do
 
   alias Serialize.{MeasureStream, ReadStream, WriteStream}
 
+  defp refusal({:error, stream}), do: Serialize.refusal(stream)
+
   describe "serialize_bytes" do
     test "the zero-length pin: { bits(5,3); bytes(count 0); bits(0xA5,8) } is 0x05 0xA5" do
       # serialize.h test_golden_zero_length_bytes: the zero-length bytes
@@ -41,11 +43,23 @@ defmodule Serialize.BytesStringTest do
       # bit 0 set plus non-zero pad bits: the align inside bytes refuses
       reader = ReadStream.new(<<0xFF, 0xEF>>)
       {:ok, reader, 1} = Serialize.serialize_bits(reader, nil, 1)
-      assert {:error, _} = Serialize.serialize_bytes(reader, nil, 1)
+      assert refusal(Serialize.serialize_bytes(reader, nil, 1)) == :nonzero_padding
+    end
+
+    test "the padding is checked before the payload length" do
+      # set padding AND a payload running past the end: the align comes
+      # first, so the refusal is nonzero_padding, not past_end
+      {:ok, reader, 1} = Serialize.serialize_bits(ReadStream.new(<<0x03>>), nil, 1)
+      assert refusal(Serialize.serialize_bytes(reader, nil, 4)) == :nonzero_padding
     end
 
     test "a count beyond the remaining data refuses" do
-      assert {:error, _} = Serialize.serialize_bytes(ReadStream.new(<<1, 2>>), nil, 3)
+      assert refusal(Serialize.serialize_bytes(ReadStream.new(<<1, 2>>), nil, 3)) == :past_end
+    end
+
+    test "a huge count is checked against the remaining bytes before anything is taken" do
+      assert refusal(Serialize.serialize_bytes(ReadStream.new(<<1, 2, 3, 4>>), nil, 0x7FFFFFFF)) ==
+               :past_end
     end
 
     test "count mismatch raises on write" do
@@ -107,7 +121,48 @@ defmodule Serialize.BytesStringTest do
       {:ok, writer, _} = Serialize.serialize_int(writer, 3, 0, 15)
       {:ok, writer, _} = Serialize.serialize_bytes(writer, <<?a, 0, ?b>>, 3)
       data = WriteStream.data(WriteStream.flush(writer))
-      assert {:error, _} = Serialize.serialize_string(ReadStream.new(data), nil, 16)
+      assert refusal(Serialize.serialize_string(ReadStream.new(data), nil, 16)) == :embedded_nul
+    end
+
+    test "the NUL scan runs over the whole payload before UTF-8 validation" do
+      # 02 FF 00: an invalid byte, then a zero byte; both rules break, and
+      # the refusal is embedded_nul
+      assert refusal(Serialize.serialize_string(ReadStream.new(<<0x02, 0xFF, 0x00>>), nil, 16)) ==
+               :embedded_nul
+
+      # the same invalid byte without the NUL is invalid_utf8
+      assert refusal(Serialize.serialize_string(ReadStream.new(<<0x02, 0xFF, 0x41>>), nil, 16)) ==
+               :invalid_utf8
+    end
+
+    test "a huge claimed length is checked against the remaining bytes first" do
+      # a 31-bit length field claiming 2^31 - 2 bytes of a 4-byte stream:
+      # refused as past_end before any payload is taken
+      data = <<0xFE, 0xFF, 0xFF, 0x7F>>
+
+      assert refusal(Serialize.serialize_string(ReadStream.new(data), nil, 0x7FFFFFFF)) ==
+               :past_end
+    end
+
+    test "real text round trips byte for byte: no normalization, no BOM stripping" do
+      for value <- [
+            "\u{56F2}\u{68CB}",
+            "\u{BC14}\u{B451}",
+            "\u{0644}\u{0639}\u{0628}\u{0629}",
+            "e\u{0301}",
+            "\u{00E9}",
+            "\u{FEFF}stones",
+            "\u{FFFF}",
+            "\u{1F600}",
+            "\u{20000}",
+            "\u{10FFFF}"
+          ] do
+        {:ok, writer, _} = Serialize.serialize_string(WriteStream.new(), value, 64)
+        data = WriteStream.data(WriteStream.flush(writer))
+        {:ok, _reader, decoded} = Serialize.serialize_string(ReadStream.new(data), nil, 64)
+        assert decoded === value
+        assert byte_size(decoded) == byte_size(value)
+      end
     end
 
     test "invalid UTF-8 fails the read" do
@@ -128,7 +183,8 @@ defmodule Serialize.BytesStringTest do
         {:ok, writer, _} = Serialize.serialize_bytes(writer, payload, byte_size(payload))
         data = WriteStream.data(WriteStream.flush(writer))
 
-        assert {:error, _} = Serialize.serialize_string(ReadStream.new(data), nil, 16),
+        assert refusal(Serialize.serialize_string(ReadStream.new(data), nil, 16)) ==
+                 :invalid_utf8,
                "payload #{inspect(payload)} was not refused"
       end
     end
@@ -139,14 +195,16 @@ defmodule Serialize.BytesStringTest do
       writer = WriteStream.new()
       {:ok, writer, _} = Serialize.serialize_bits(writer, 11, 4)
       data = WriteStream.data(WriteStream.flush(writer))
-      assert {:error, _} = Serialize.serialize_string(ReadStream.new(data), nil, 11)
+
+      assert refusal(Serialize.serialize_string(ReadStream.new(data), nil, 11)) ==
+               :value_out_of_range
     end
 
     test "a truncated payload refuses" do
       writer = WriteStream.new()
       {:ok, writer, _} = Serialize.serialize_int(writer, 9, 0, 15)
       data = WriteStream.data(WriteStream.flush(writer))
-      assert {:error, _} = Serialize.serialize_string(ReadStream.new(data), nil, 16)
+      assert refusal(Serialize.serialize_string(ReadStream.new(data), nil, 16)) == :past_end
     end
 
     test "a string that does not fit raises on write" do
@@ -162,103 +220,10 @@ defmodule Serialize.BytesStringTest do
     end
   end
 
-  describe "serialize_wstring" do
-    test "the worked example: \"мир\" in a wide buffer of 8 is the 13-byte run" do
-      # STANDARD.md "Worked Example": 3-bit length, then three 32-bit
-      # groups, no alignment anywhere in the operation
-      writer = WriteStream.new()
-      {:ok, writer, _} = Serialize.serialize_wstring(writer, "мир", 8)
-      {:ok, writer} = Serialize.serialize_align(writer)
-      writer = WriteStream.flush(writer)
-
-      assert WriteStream.data(writer) ==
-               <<0xE3, 0x21, 0x00, 0x00, 0xC0, 0x21, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00>>
-
-      assert Serialize.bits_processed(writer) == 104
-    end
-
-    test "round-trips BMP and astral text; an astral code point is two groups" do
-      for {value, buffer_size, units} <- [
-            {"мир", 8, 3},
-            {"", 2, 0},
-            {"ascii", 16, 5},
-            # U+1D11E musical symbol: a surrogate pair on the wire
-            {"a𝄞b", 8, 4}
-          ] do
-        {:ok, writer, ^value} = Serialize.serialize_wstring(WriteStream.new(), value, buffer_size)
-
-        expected_bits =
-          Serialize.Bits.bits_required(0, buffer_size - 1) + 32 * units
-
-        assert Serialize.bits_processed(writer) == expected_bits
-
-        writer = WriteStream.flush(writer)
-        reader = ReadStream.new(WriteStream.data(writer))
-        {:ok, _reader, decoded} = Serialize.serialize_wstring(reader, nil, buffer_size)
-        assert decoded == value
-      end
-    end
-
-    test "malformed payloads fail the read: every refusal rule" do
-      # each case writes a doctored group sequence under a 3-bit length
-      doctored = fn length, groups ->
-        writer = WriteStream.new()
-        {:ok, writer, _} = Serialize.serialize_int(writer, length, 0, 7)
-
-        writer =
-          Enum.reduce(groups, writer, fn group, writer ->
-            {:ok, writer, _} = Serialize.serialize_bits(writer, group, 32)
-            writer
-          end)
-
-        WriteStream.data(WriteStream.flush(writer))
-      end
-
-      refusals = [
-        # a group above 0xFFFF is not a UTF-16 code unit
-        {1, [0x10000]},
-        # an interior NUL group: the two-lengths smuggling primitive
-        {2, [0x41, 0x0000]},
-        # a high surrogate without its low
-        {2, [0xD800, 0x41]},
-        # a low surrogate with no high before it
-        {1, [0xDC00]},
-        # a dangling high surrogate as the final group
-        {1, [0xD800]}
-      ]
-
-      for {length, groups} <- refusals do
-        data = doctored.(length, groups)
-
-        assert {:error, _} = Serialize.serialize_wstring(ReadStream.new(data), nil, 8),
-               "groups #{inspect(groups)} were not refused"
-      end
-
-      # and the well-formed pair passes: it is how astral text travels
-      data = doctored.(2, [0xD834, 0xDD1E])
-      {:ok, _reader, decoded} = Serialize.serialize_wstring(ReadStream.new(data), nil, 8)
-      assert decoded == "𝄞"
-    end
-
-    test "a truncated payload refuses" do
-      writer = WriteStream.new()
-      {:ok, writer, _} = Serialize.serialize_int(writer, 3, 0, 7)
-      {:ok, writer, _} = Serialize.serialize_bits(writer, 0x41, 32)
-      data = WriteStream.data(WriteStream.flush(writer))
-      assert {:error, _} = Serialize.serialize_wstring(ReadStream.new(data), nil, 8)
-    end
-
-    test "a wstring that does not fit its buffer raises on write" do
-      # 4 units < buffer_size must hold: "a𝄞b" is 4 units
-      assert_raise ArgumentError, fn ->
-        Serialize.serialize_wstring(WriteStream.new(), "a𝄞b", 4)
-      end
-    end
-
-    test "measure charges the length field plus 32 bits per unit, no align" do
-      measure = MeasureStream.new()
-      {:ok, measure, _} = Serialize.serialize_wstring(measure, "мир", 8)
-      assert Serialize.bits_processed(measure) == 3 + 96
+  describe "wstring" do
+    test "is gone in format 2.0: text travels as string" do
+      Code.ensure_loaded!(Serialize)
+      refute function_exported?(Serialize, :serialize_wstring, 3)
     end
   end
 end

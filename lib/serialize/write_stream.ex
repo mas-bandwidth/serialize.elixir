@@ -174,6 +174,13 @@ defmodule Serialize.WriteStream do
     end
   end
 
+  @doc """
+  Writes the end of the object: nothing. The unused bits of the final byte
+  are zero because the flush writes them so.
+  """
+  @spec serialize_end(t) :: {:ok, t}
+  def serialize_end(%__MODULE__{} = stream), do: {:ok, stream}
+
   @doc "The number of zero pad bits an align would write now, in `[0, 7]`."
   @spec align_bits(t) :: 0..7
   def align_bits(%__MODULE__{} = stream), do: rem(8 - rem(stream.bits_written, 8), 8)

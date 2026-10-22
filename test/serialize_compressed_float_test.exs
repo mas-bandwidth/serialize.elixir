@@ -140,13 +140,72 @@ defmodule Serialize.CompressedFloatTest do
     {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), 1001, 10)
     data = WriteStream.data(WriteStream.flush(writer))
 
-    assert {:error, _} =
-             Serialize.serialize_compressed_float(ReadStream.new(data), nil, 0.0, 10.0, 0.01)
+    {:error, reader} =
+      Serialize.serialize_compressed_float(ReadStream.new(data), nil, 0.0, 10.0, 0.01)
+
+    assert Serialize.refusal(reader) == :value_out_of_range
   end
 
   test "a truncated read refuses" do
-    assert {:error, _} =
-             Serialize.serialize_compressed_float(ReadStream.new(<<0xFF>>), nil, 0.0, 10.0, 0.01)
+    {:error, reader} =
+      Serialize.serialize_compressed_float(ReadStream.new(<<0xFF>>), nil, 0.0, 10.0, 0.01)
+
+    assert Serialize.refusal(reader) == :past_end
+  end
+
+  # [3 * 2^103, FLT_MAX] at resolution 2^104: delta and delta / res are
+  # finite, and still the top integer, 2^24 - 2 in 24 bits, decodes to
+  # min + delta, which rounds to 2^128: +inf
+  @top_min 3.0 * :math.pow(2, 103)
+  @top_max 3.4028234663852886e38
+  @top_res :math.pow(2, 104)
+
+  test "a decode that is not finite is refused, whatever the declaration" do
+    {:error, reader} =
+      Serialize.serialize_compressed_float(
+        ReadStream.new(<<0xFE, 0xFF, 0xFF>>),
+        nil,
+        @top_min,
+        @top_max,
+        @top_res
+      )
+
+    assert Serialize.refusal(reader) == :non_finite_float
+
+    # the integer one below the top decodes finite and is accepted
+    {:ok, _reader, value} =
+      Serialize.serialize_compressed_float(
+        ReadStream.new(<<0xFD, 0xFF, 0xFF>>),
+        nil,
+        @top_min,
+        @top_max,
+        @top_res
+      )
+
+    assert Float32.bits32(value) == 0x7F7FFFFE
+  end
+
+  test "a declaration whose top decodes to an infinity raises on the write path only" do
+    # non-conforming as a whole: even a value that would decode finite
+    assert_raise ArgumentError, fn ->
+      Serialize.serialize_compressed_float(
+        WriteStream.new(),
+        @top_min,
+        @top_min,
+        @top_max,
+        @top_res
+      )
+    end
+
+    assert_raise ArgumentError, fn ->
+      Serialize.serialize_compressed_float(
+        MeasureStream.new(),
+        @top_min,
+        @top_min,
+        @top_max,
+        @top_res
+      )
+    end
   end
 
   test "non-conforming declarations and values raise on write" do
@@ -165,15 +224,10 @@ defmodule Serialize.CompressedFloatTest do
       Serialize.serialize_compressed_float(WriteStream.new(), 0.0, -3.0e38, 3.0e38, 0.01)
     end
 
-    # a non-finite value through compressed_float is non-conforming
+    # a value that is not a number through compressed_float is
+    # non-conforming
     assert_raise ArgumentError, fn ->
-      Serialize.serialize_compressed_float(
-        WriteStream.new(),
-        {:nonfinite, 0x7FC00000},
-        0.0,
-        10.0,
-        0.01
-      )
+      Serialize.serialize_compressed_float(WriteStream.new(), :nan, 0.0, 10.0, 0.01)
     end
   end
 

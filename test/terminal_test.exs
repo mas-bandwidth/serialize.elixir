@@ -86,16 +86,15 @@ defmodule Serialize.TerminalTest do
     assert {:error, _} = Serialize.serialize_align(stream)
     assert {:error, _} = Serialize.serialize_bytes(stream, nil, 1)
     assert {:error, _} = Serialize.serialize_string(stream, nil, 16)
-    assert {:error, _} = Serialize.serialize_wstring(stream, nil, 16)
+    assert {:error, _} = Serialize.serialize_end(stream)
     assert {:error, _} = Serialize.serialize_fixed(stream, nil, 16, 16, -1, 1)
   end
 
   test "a zero-bit read refuses on a failed stream, at every operation that has one" do
-    # STANDARD.md, Reader Obligations: "Every read consults the failure
-    # state before it does anything else, zero-bit reads included, so a
-    # degenerate ranged read, an align on an already aligned stream, a
-    # bytes call of zero count and object all refuse on a stream that has
-    # already failed." Each read below consumes nothing and would
+    # STANDARD.md, Reader Obligations, "Failure is terminal": every later
+    # read is refused, "zero-bit reads included: a degenerate ranged field,
+    # an align on an aligned stream, a `bytes` of zero count, an `object`,
+    # and an `end`." Each read below consumes nothing and would
     # otherwise always succeed, which is what a reader treating "consumes
     # no bits" as "cannot fail" gets wrong.
     {:error, stream} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 32)
@@ -107,6 +106,27 @@ defmodule Serialize.TerminalTest do
     assert {:error, _} = Serialize.serialize_fixed(stream, nil, 16, 16, 7, 7)
     assert {:error, _} = Serialize.serialize_align(stream)
     assert {:error, _} = Serialize.serialize_bytes(stream, nil, 0)
+    # the stream is exactly consumed here, so an end would otherwise accept
+    assert {:error, _} = Serialize.serialize_end(stream)
+  end
+
+  test "the first refusal's reason is kept: later refusals are its echoes" do
+    {:error, stream} = Serialize.serialize_int(ReadStream.new(<<0x09, 0xFF>>), nil, 0, 8)
+    assert Serialize.refusal(stream) == :value_out_of_range
+
+    # an end that would refuse for trailing data, a read that would run
+    # past the end, an align that would find set padding: all echoes
+    {:error, stream} = Serialize.serialize_end(stream)
+    {:error, stream} = Serialize.serialize_bits(stream, 0, 32)
+    {:error, stream} = Serialize.serialize_align(stream)
+    assert Serialize.refusal(stream) == :value_out_of_range
+    assert ReadStream.fail(stream, :past_end) == stream
+  end
+
+  test "a fresh stream has no refusal" do
+    assert Serialize.refusal(ReadStream.new(<<>>)) == nil
+    {:ok, stream, _} = Serialize.serialize_bits(ReadStream.new(<<0xFF>>), 0, 8)
+    assert Serialize.refusal(stream) == nil
   end
 
   test "a failed stream consumes no further bits" do
