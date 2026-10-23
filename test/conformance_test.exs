@@ -58,7 +58,7 @@ defmodule Serialize.ConformanceTest do
 
   test "the corpus is discovered, and an empty corpus fails the run" do
     assert ConformanceVectors.files() != [],
-           "conformance/ is empty: vendor it from mas-bandwidth/serialize"
+           "#{ConformanceVectors.dir()} is empty: vendor it from mas-bandwidth/serialize"
 
     # the generated tests below are fixed at compile time; this compares
     # them against the corpus on disk, so a stale build cannot pass by

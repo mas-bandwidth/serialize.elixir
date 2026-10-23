@@ -1,0 +1,104 @@
+name: nightly conformance
+
+# A functional test, nightly on the fleet: this port against the CURRENT C/C++
+# data. ci.yml checks the vendored corpus against upstream on every push and
+# drives the corpus through the C++ reader at the family pin; this job checks
+# the port against mas-bandwidth/serialize main as it stands tonight.
+# serialize has no corpus generator (the corpus is hand-authored by design,
+# conformance.cpp says why), so the committed upstream corpus is the data, and
+# the C++ reference is built and run against it first: a vector the reference
+# does not pass is not one a port is held to.
+#
+# Serialize.ConformanceVectors reads the upstream corpus through
+# SERIALIZE_CORPUS_DIR. Encodes must match byte for byte, decodes of the C/C++
+# bytes must match values, and every control must still refuse. Then the
+# vendored copy is diffed against upstream main, and drift is red: a port
+# behind the standard is what this job exists to catch.
+#
+# workflow_dispatch with negative_control flips one hex digit of one vector in
+# a scratch copy of the upstream corpus, and the job must go red.
+
+on:
+  schedule:
+    - cron: '5 6 * * *'   # every day at 06:05 UTC
+  workflow_dispatch:
+    inputs:
+      negative_control:
+        description: 'Flip one byte of one upstream vector; the job must go red'
+        type: boolean
+        default: false
+
+jobs:
+  conformance:
+    name: the port against mas-bandwidth/serialize main
+    # THE FORK GUARD: this repository is PUBLIC and these are the fleet's runners.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, nightly]
+    timeout-minutes: 30
+    env:
+      MIX_ENV: test
+    steps:
+      - name: Runner
+        run: |
+          echo "runner: $RUNNER_NAME"
+          . /etc/os-release && echo "os: $PRETTY_NAME"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+
+      - name: Check out mas-bandwidth/serialize at main
+        run: |
+          rm -rf "$RUNNER_TEMP/serialize"
+          git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git "$RUNNER_TEMP/serialize"
+          echo "upstream: mas-bandwidth/serialize@$(git -C "$RUNNER_TEMP/serialize" rev-parse HEAD) (committed corpus, no generator upstream)"
+
+      - name: Build the C++ reference and run the corpus and its controls through it
+        working-directory: ${{ runner.temp }}/serialize
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+
+      - name: Copy the upstream corpus to the root the port reads
+        run: |
+          root="$RUNNER_TEMP/corpus"
+          rm -rf "$root" && mkdir -p "$root"
+          cp -R "$RUNNER_TEMP/serialize/conformance" "$RUNNER_TEMP/serialize/conformance-controls" "$root"
+          echo "SERIALIZE_CORPUS_DIR=$root" >> "$GITHUB_ENV"
+
+      - name: Negative control - flip one hex digit of one vector's bytes
+        if: inputs.negative_control
+        run: |
+          f="$SERIALIZE_CORPUS_DIR/conformance/bits.txt"
+          n=$(grep -n -m1 '^bytes [0-9A-F]' "$f" | cut -d: -f1)
+          line=$(sed -n "${n}p" "$f")
+          d=${line:6:1}
+          flipped=$(printf '%X' $(( 0x$d ^ 8 )))
+          sed -i "${n}s/^bytes $d/bytes $flipped/" "$f"
+          echo "negative control: $f line $n: [$line] is now [$(sed -n "${n}p" "$f")]"
+
+      # The same OTP and Elixir ci.yml uses, installed into the runner's tool
+      # cache, so nothing global changes. setup-beam picks its prebuilt OTP by
+      # the hosted runners' ImageOS, which a self-hosted runner does not set.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124   # v1
+        env:
+          ImageOS: ubuntu24
+        with:
+          otp-version: "29.0"
+          elixir-version: "1.20.4"
+
+      - name: Compile with zero warnings
+        run: mix compile --warnings-as-errors
+
+      - name: Run the port's conformance runner against the upstream corpus
+        run: mix test test/conformance_test.exs --warnings-as-errors
+
+      - name: Run the port's negative controls against the upstream lists
+        run: mix test --only controls --warnings-as-errors
+
+      - name: The vendored corpus matches mas-bandwidth/serialize main (drift is red)
+        if: always()
+        run: |
+          diff -ru "$RUNNER_TEMP/serialize"/conformance conformance
+          diff -ru "$RUNNER_TEMP/serialize"/conformance-controls conformance-controls
+          diff -u "$RUNNER_TEMP/serialize"/STANDARD.md STANDARD.md
+          diff -u "$RUNNER_TEMP/serialize"/IMPLEMENTING.md IMPLEMENTING.md

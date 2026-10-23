@@ -69,15 +69,38 @@ defmodule Serialize.ConformanceVectors do
           writer_input: non_neg_integer | nil
         }
 
-  @dir Path.expand("../../conformance", __DIR__)
+  @vendored_root Path.expand("../..", __DIR__)
 
-  @doc "The vendored corpus directory."
+  @doc """
+  The corpus root: the directory holding `conformance/` and
+  `conformance-controls/`. It is the repository (the vendored copy) unless
+  `SERIALIZE_CORPUS_DIR` names another one, which is how the nightly
+  functional test points this runner at mas-bandwidth/serialize main.
+  """
+  @spec root() :: String.t()
+  def root, do: root(System.get_env("SERIALIZE_CORPUS_DIR"))
+
+  @doc "The corpus root for a `SERIALIZE_CORPUS_DIR` value; unset or empty is the repository."
+  @spec root(String.t() | nil) :: String.t()
+  def root(nil), do: @vendored_root
+  def root(""), do: @vendored_root
+  def root(value), do: Path.expand(value)
+
+  @doc "The corpus directory, `conformance/` under the corpus root."
   @spec dir() :: String.t()
-  def dir, do: @dir
+  def dir, do: Path.join(root(), "conformance")
+
+  @doc "The controls directory, `conformance-controls/` under the corpus root."
+  @spec controls_dir() :: String.t()
+  def controls_dir, do: Path.join(root(), "conformance-controls")
 
   @doc "The corpus files, discovered from the directory and sorted by name."
   @spec files() :: [String.t()]
-  def files, do: @dir |> Path.join("*.txt") |> Path.wildcard() |> Enum.sort()
+  def files, do: files(dir())
+
+  @doc "The corpus files of one directory, sorted by name."
+  @spec files(String.t()) :: [String.t()]
+  def files(dir), do: dir |> Path.join("*.txt") |> Path.wildcard() |> Enum.sort()
 
   @doc """
   Every vector in the corpus, in file order. A name stated twice raises:
