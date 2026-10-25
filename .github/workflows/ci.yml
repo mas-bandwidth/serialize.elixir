@@ -12,6 +12,8 @@ jobs:
         with:
           otp-version: "29.0"
           elixir-version: "1.20.4"
+      # dialyxir is a dev-only dependency (mix.exs); dev builds need it fetched
+      - run: mix deps.get
       - run: mix format --check-formatted
       # zero warnings, the library and the suite alike
       - run: mix compile --warnings-as-errors
@@ -20,6 +22,56 @@ jobs:
       # reader with one refusal rule deleted fails exactly the vectors
       # conformance-controls/<rule>.expected names
       - run: mix test --only controls --warnings-as-errors
+
+  # Dialyzer is the port's strictest static lens: every @spec and @type in lib/
+  # is held against the success typing of the code, with the extra warning
+  # classes mix.exs names, zero warnings and no ignore file. The PLT is cached
+  # on the exact OTP and Elixir versions and mix.lock, so a toolchain or
+  # dialyxir bump rebuilds it rather than reusing a stale one.
+  dialyzer:
+    name: dialyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          otp-version: "29.0"
+          elixir-version: "1.20.4"
+      - run: mix deps.get
+      - name: Restore the PLT
+        id: plt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+      - name: Build the PLT
+        if: steps.plt-cache.outputs.cache-hit != 'true'
+        run: mix dialyzer --plt
+      - name: Save the PLT
+        if: steps.plt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: priv/plts
+          key: ${{ steps.plt-cache.outputs.cache-primary-key }}
+      - name: mix dialyzer, zero warnings
+        run: mix dialyzer --format github
+      # The reversed witness: plant one type violation (bits_read/1 returns a
+      # binary where its @spec promises a non_neg_integer) and dialyzer must
+      # fail, naming that contract. A lens that cannot go red proves nothing.
+      - name: Negative control - a planted type violation must fail dialyzer
+        run: |
+          sed -i 's/do: reader\.bits_read$/do: Integer.to_string(reader.bits_read)/' lib/serialize/bit_reader.ex
+          grep -q 'Integer.to_string(reader.bits_read)' lib/serialize/bit_reader.ex
+          if mix dialyzer --format short > /tmp/dialyzer-control.txt 2>&1; then
+            cat /tmp/dialyzer-control.txt
+            echo "::error::dialyzer passed a planted type violation"
+            exit 1
+          fi
+          cat /tmp/dialyzer-control.txt
+          grep -q 'bit_reader.ex:.*invalid_contract' /tmp/dialyzer-control.txt
+          echo "negative control: dialyzer refused the planted violation"
+          git checkout -- lib/serialize/bit_reader.ex
 
   spec-sync:
     name: STANDARD.md matches upstream
@@ -132,6 +184,7 @@ jobs:
         with:
           otp-version: "29.0"
           elixir-version: "1.20.4"
+      - run: mix deps.get
 
       - name: Check out the C++ reference at the pinned release
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
