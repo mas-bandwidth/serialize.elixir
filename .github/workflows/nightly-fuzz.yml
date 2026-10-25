@@ -1,0 +1,56 @@
+# Mirrors the C++ reference's nightly-fuzz.yml for the differential fuzzer. The
+# CI fuzz job is a sixty second smoke run on a fixed seed; this is the run with
+# time to explore, on a fresh seed every night, logged so any red reproduces
+# with `go test ... -seed <seed>`. The differential has no corpus to carry
+# between runs (each program is generated from the seed), so the varying seed
+# is what makes the nights cumulative. Failing programs are written replayable
+# by fuzz/driver.exs and uploaded.
+name: Nightly Fuzz
+
+on:
+  schedule:
+    - cron: '30 8 * * *'   # every day at 08:30 UTC
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration in seconds'
+        default: '3600'
+        required: false
+
+jobs:
+  fuzz:
+    name: fuzz (differential against serialize.go, extended)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0"
+          elixir-version: "1.20.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fuzz/go.mod
+          cache-dependency-path: fuzz/go.sum
+      - run: MIX_ENV=test mix compile --warnings-as-errors
+
+      - name: Pick and log the seed
+        run: |
+          seed=$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')
+          echo "SEED=$seed" >> "$GITHUB_ENV"
+          echo "fuzz seed: $seed (reproduce: cd fuzz && go test -count=1 -run TestDifferentialAgainstSerializeGo -v . -seed $seed)"
+
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          duration="${{ github.event.inputs.duration || '3600' }}"
+          go test -count=1 -timeout 85m -run TestDifferentialAgainstSerializeGo -v . \
+            -seed "$SEED" -duration "${duration}s" -failures "$GITHUB_WORKSPACE/fuzz-failures"
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: fuzz-failures
+          if-no-files-found: ignore
