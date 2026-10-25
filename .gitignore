@@ -1,2 +1,4 @@
 dist/
 _build/
+priv/plts/
+deps/
