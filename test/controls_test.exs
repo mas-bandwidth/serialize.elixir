@@ -154,6 +154,18 @@ defmodule Serialize.ControlsTest do
         "          {:ok, read, Kernel.min(trunc((min + offset64) * 1.0), 0x7FFFFFFFFFFFFFFF)} # NEGATIVE CONTROL: the value goes through a double on purpose"}
      ]},
 
+    # A nested object on a failed stream refuses, on entry and on exit. This
+    # port composes nested objects with plain calls, so the rule lives in the
+    # runner's composition rather than in lib/, and the sabotage patches the
+    # runner: both checks go, since either alone refuses an empty object.
+    {"object-terminal", "a nested object on a failed stream refuses",
+     [
+       {"../test/support/conformance_runner.ex", "    if failed?(stream) do",
+        "    if failed?(stream) and node == nil do" <> @deleted},
+       {"../test/support/conformance_runner.ex", "          if failed?(stream),",
+        "          if failed?(stream) and node == nil," <> @deleted}
+     ]},
+
     # the refusal reason: this reader refuses every stream the real one
     # refuses, and names the wrong rule for one of them
     {"wrong-reason", "a refusal names the rule that refused it",

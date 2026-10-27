@@ -317,14 +317,31 @@ defmodule Serialize.ConformanceRunner do
   # this port composition is a function call and nothing else, so the
   # nested steps run through one here, exactly as a caller's own nested
   # serialize function would.
-  defp run_node(stream, %{kind: :object, steps: children}) do
-    case run_nodes(stream, children) do
-      {:ok, stream, values} -> {:ok, stream, [@no_value | values]}
-      {:error, stream, _index, step} -> {:error, stream, step}
+  #
+  # The composition is still a read on the stream, so it keeps the stream's
+  # terminality as the reference's serialize_object does: a refused read
+  # stream refuses the object on entry and on exit, with the latched reason,
+  # even when the object is empty and its steps consume nothing.
+  defp run_node(stream, %{kind: :object, steps: children} = node) do
+    if failed?(stream) do
+      {:error, stream, node}
+    else
+      case run_nodes(stream, children) do
+        {:ok, stream, values} ->
+          if failed?(stream),
+            do: {:error, stream, node},
+            else: {:ok, stream, [@no_value | values]}
+
+        {:error, stream, _index, step} ->
+          {:error, stream, step}
+      end
     end
   end
 
   defp run_node(stream, step), do: run_step(stream, step)
+
+  defp failed?(%ReadStream{} = stream), do: ReadStream.failed?(stream)
+  defp failed?(_stream), do: false
 
   defp run_step(stream, %{kind: :bits} = step),
     do: wrap(step, Serialize.serialize_bits(stream, step.value, step.width))

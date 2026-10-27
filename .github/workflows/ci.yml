@@ -177,7 +177,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-latest
     env:
-      SERIALIZE_TAG: v2.0.0
+      SERIALIZE_TAG: v2.0.1
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
