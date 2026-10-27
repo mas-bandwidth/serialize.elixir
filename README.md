@@ -193,6 +193,11 @@ bytes with the reference on every push, so wire compatibility is
 measured rather than asserted. `mix run interop/interop.exs write
 out.bin` runs one exchange by hand.
 
+`mix dialyzer` (dialyxir, pinned, dev only) holds every `@spec` and
+`@type` in `lib/` against the success typing of the code, with zero
+warnings and no ignore file. The CI `dialyzer` job runs it, then plants
+one type violation and requires dialyzer to refuse it.
+
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 ## Write stream growth

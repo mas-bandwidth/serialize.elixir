@@ -114,5 +114,7 @@ defmodule Serialize.BitReader do
 
   @doc "The number of bits still available to read."
   @spec bits_remaining(t) :: non_neg_integer
-  def bits_remaining(%__MODULE__{} = reader), do: reader.num_bits - reader.bits_read
+  def bits_remaining(%__MODULE__{num_bits: num_bits, bits_read: bits_read})
+      when is_integer(num_bits) and is_integer(bits_read),
+      do: num_bits - bits_read
 end
