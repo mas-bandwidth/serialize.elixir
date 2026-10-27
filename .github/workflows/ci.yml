@@ -73,6 +73,59 @@ jobs:
           echo "negative control: dialyzer refused the planted violation"
           git checkout -- lib/serialize/bit_reader.ex
 
+  # The differential fuzz smoke run, the family's pattern for a language with
+  # no native coverage-guided fuzzer (serialize.lua/fuzz). fuzz/ is a Go module
+  # that pins serialize.go v2 as the other side: for sixty seconds of generated
+  # programs covering every operation, both writers must emit identical bytes,
+  # each side must read the other's bytes back to the values written, the
+  # measure must never under-measure, and on mutated and hostile bytes both
+  # readers must agree on whether, where and why they stop. Fixed seed, so a
+  # red here reproduces. The extended run with a varying seed is
+  # nightly-fuzz.yml. A functional test: it spawns the BEAM.
+  fuzz:
+    name: fuzz (differential against serialize.go)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0"
+          elixir-version: "1.20.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fuzz/go.mod
+          cache-dependency-path: fuzz/go.sum
+      - run: MIX_ENV=test mix compile --warnings-as-errors
+      - name: gofmt and go vet
+        working-directory: fuzz
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+      - name: Fuzz (60 s smoke)
+        working-directory: fuzz
+        run: go test -count=1 -timeout 10m -run TestDifferentialAgainstSerializeGo -v . -duration 60s -failures "$GITHUB_WORKSPACE/fuzz-failures"
+      # The reversed witness: -widen-int makes the Go side use int64 ranges one
+      # bit wider than the Elixir side declares. The same harness must go red,
+      # on the bytes, or it is not checking anything.
+      - name: Negative control - widened int ranges must go red
+        working-directory: fuzz
+        run: |
+          if go test -count=1 -timeout 10m -run TestDifferentialAgainstSerializeGo -v -widen-int . > /tmp/fuzz-control.txt 2>&1; then
+            cat /tmp/fuzz-control.txt
+            echo "::error::the differential passed with widened int ranges"
+            exit 1
+          fi
+          head -n 20 /tmp/fuzz-control.txt
+          grep -q 'bytes differ' /tmp/fuzz-control.txt
+          echo "negative control: the differential went red on widened int ranges"
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: fuzz-failures
+          if-no-files-found: ignore
+
   spec-sync:
     name: STANDARD.md matches upstream
     runs-on: ubuntu-latest

@@ -198,6 +198,23 @@ out.bin` runs one exchange by hand.
 warnings and no ignore file. The CI `dialyzer` job runs it, then plants
 one type violation and requires dialyzer to refuse it.
 
+[`fuzz/`](fuzz) is the differential fuzzer, the family's pattern for a
+language with no native coverage-guided fuzzer: a Go module pinning
+serialize.go v2 as the other side generates programs over every
+operation, ended by `serialize_end`, and runs them through
+`fuzz/driver.exs` a batch per BEAM start. Both writers must emit
+identical bytes, each side must read the other's bytes back to the values
+written, the measure must never under-measure, and on mutated and hostile
+bytes both readers must agree on whether, where and why they stop. CI runs
+a sixty second smoke run on a fixed seed and requires the `-widen-int`
+negative control to go red; `nightly-fuzz.yml` runs an hour on a fresh,
+logged seed and uploads failing programs, replayable by the driver.
+
+```sh
+MIX_ENV=test mix compile
+cd fuzz && go test -count=1 -run TestDifferentialAgainstSerializeGo -v . -duration 60s
+```
+
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 ## Write stream growth
