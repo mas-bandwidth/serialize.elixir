@@ -39,7 +39,7 @@ defmodule Serialize.ControlsTest do
   @moduletag :controls
 
   @lib Path.expand("../lib", __DIR__)
-  @controls_dir Path.expand("../conformance-controls", __DIR__)
+  @controls_dir ConformanceVectors.controls_dir()
 
   @deleted " # NEGATIVE CONTROL: this rule is deleted on purpose"
 
