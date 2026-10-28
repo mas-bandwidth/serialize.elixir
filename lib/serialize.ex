@@ -15,9 +15,17 @@ defmodule Serialize do
     * `{:error, stream}` — a read refusal, the reference's `false` return;
       `refusal/1` names the rule that refused it.
 
-  Writes assume trusted data: caller contract violations raise
-  `ArgumentError`, this implementation's misuse convention. Reads validate
-  always — hostile bytes refuse as values and never raise.
+  Writes assume trusted data. Write misuse — a value outside its range or
+  width, a float not finite in float32, a bad declaration, text that is not
+  UTF-8, holds a zero byte or does not fit, `serialize_reject/1` on a
+  write — raises `ArgumentError` at the call. That is this implementation's
+  trap (IMPLEMENTING.md U9): Elixir has no unchecked build, so it traps in
+  every run, on the write and the measure stream alike (U6). Write misuse
+  never latches: a write or measure stream has no refusal state, and the
+  reader's reasons are never recorded there. `serialize_fail/2` on a write
+  or measure returns `{:error, stream}`, records nothing, and never raises.
+  Reads validate always — hostile bytes refuse as values and never raise
+  (U7).
 
   A refusal hands back no value at all: `{:error, stream}` has no third
   element, so nothing can be mistaken for a decoded value. It is also
@@ -323,8 +331,11 @@ defmodule Serialize do
   Serializes a float quantized to a resolution over `[min, max]`
   (STANDARD.md "compressed_float"). The quantization arithmetic is float32
   with two roundings on each side, emulated exactly; the declaration must
-  be finite in float32, top decode (`min + delta`) included, and writing a
-  non-finite value is non-conforming — both raise on the write path. The
+  be finite in float32, top decode (`min + delta`) included, and a value
+  that is not finite in float32 — a double past FLT_MAX, or an integer too
+  large for a double — is write misuse: both raise `ArgumentError` on write
+  and measure, and such a value is never clamped (IMPLEMENTING.md U9). A
+  finite value outside `[min, max]` clamps into it. The
   reader refuses an integer above the step count as `:value_out_of_range`
   and a decode that is not finite as `:non_finite_float`, whatever the
   declaration. Lossy by construction: a round trip returns the nearest
@@ -454,9 +465,7 @@ defmodule Serialize do
   defp compressed_float(stream, value, miv, bits, delta, min32) do
     integer_value =
       if writing?(stream) do
-        unless is_number(value) do
-          raise ArgumentError, "serialize_compressed_float value must be a finite number"
-        end
+        value32 = compressed_float_value32(value)
 
         # the declaration's top decode must be finite: checked where the
         # declaration is used to write, never on read, where the decode
@@ -466,7 +475,7 @@ defmodule Serialize do
                 "serialize_compressed_float declaration decodes its top integer to an infinity"
         end
 
-        compressed_float_quantize(value, min32, delta, miv)
+        compressed_float_quantize(value32, min32, delta, miv)
       else
         0
       end
@@ -492,30 +501,29 @@ defmodule Serialize do
 
   defp read_compressed_float(stream, decoded), do: {:ok, stream, decoded}
 
+  # The caller's value narrowed to float32, as the reference's float
+  # parameter narrows it. A value whose float32 form is not finite is write
+  # misuse and raises (U9): the reference asserts a non-finite value, and
+  # only its unchecked build clamps one.
+  defp compressed_float_value32(value) do
+    with {:ok, float} <- to_double(value),
+         value32 when is_float(value32) <- Float32.round32(float) do
+      value32
+    else
+      _ -> raise ArgumentError, "serialize_compressed_float value must be finite in float32"
+    end
+  end
+
   # The writer's quantization, exactly the reference's float32 steps: the
   # normalized value clamps to [0,1], the product rounds to float32 BEFORE
   # 0.5 is added, that sum rounds before the floor, and the floored integer
   # clamps to the step count (the normative integer clamp, STANDARD.md
-  # 2026-08-23). A value whose float32 form overflows behaves as the
-  # reference's infinity does: it clamps, and so does an integer too large
-  # for a double.
-  defp compressed_float_quantize(value, min32, delta, miv) do
-    value32 =
-      case to_double(value) do
-        {:ok, float} -> Float32.round32(float)
-        :error when value > 0 -> :pos_inf
-        :error -> :neg_inf
-      end
-
-    difference =
-      case value32 do
-        :pos_inf -> :pos_inf
-        :neg_inf -> :neg_inf
-        v32 -> Float32.round32(v32 - min32)
-      end
-
+  # 2026-08-23). The value is already float32 and finite; the difference
+  # from min can still overflow float32, and clamps as the reference's
+  # infinity does.
+  defp compressed_float_quantize(value32, min32, delta, miv) do
     normalized =
-      case difference do
+      case Float32.round32(value32 - min32) do
         :pos_inf -> 1.0
         :neg_inf -> 0.0
         d -> clamp01(Float32.round32(d / delta))
@@ -822,6 +830,55 @@ defmodule Serialize do
         "serialize_string buffer_size must be an integer in [1, 2^31-1], got #{inspect(buffer_size)}"
       )
 
+  @doc """
+  Bounds a string for a `serialize_string/3` buffer (the reference's
+  `serialize_copy_string`, IMPLEMENTING.md U15): returns the bytes of
+  `source` before its first zero byte, and if there are more than
+  `dest_size - 1` of them, the first `dest_size - 1`, then drops bytes from
+  the end while the first byte left out is a UTF-8 continuation byte
+  (`10xxxxxx`). For well-formed UTF-8 that is the longest prefix that fits
+  and does not end inside a character, so `serialize_string/3` with
+  `buffer_size = dest_size` accepts it.
+
+  Elixir strings are values, so the helper returns the prefix rather than
+  filling a buffer. It works on any binary, by the byte rule above.
+  A `dest_size` below 1 or not an integer, or a `source` that is not a
+  binary, is write misuse and raises `ArgumentError` (U9).
+
+      iex> Serialize.serialize_copy_string("héllo", 3)
+      "h"
+  """
+  @spec serialize_copy_string(binary, pos_integer) :: binary
+  def serialize_copy_string(source, dest_size)
+      when is_binary(source) and is_integer(dest_size) and dest_size >= 1 do
+    prefix =
+      case :binary.match(source, <<0>>) do
+        {at, 1} -> binary_part(source, 0, at)
+        :nomatch -> source
+      end
+
+    if byte_size(prefix) <= dest_size - 1 do
+      prefix
+    else
+      binary_part(prefix, 0, whole_character_cut(prefix, dest_size - 1))
+    end
+  end
+
+  def serialize_copy_string(source, dest_size) do
+    raise ArgumentError,
+          "serialize_copy_string needs a binary source and an integer dest_size >= 1, " <>
+            "got #{inspect(source)}, #{inspect(dest_size)}"
+  end
+
+  # Backs a cut off while the first byte left out is a continuation byte.
+  defp whole_character_cut(_prefix, 0), do: 0
+
+  defp whole_character_cut(prefix, cut) do
+    if (:binary.at(prefix, cut) &&& 0xC0) == 0x80,
+      do: whole_character_cut(prefix, cut - 1),
+      else: cut
+  end
+
   # ------------------------------------------------------------------
   # end
   # ------------------------------------------------------------------
@@ -857,13 +914,14 @@ defmodule Serialize do
       end
 
   Rejecting only means something on read. On a write or measure stream it
-  is caller misuse, and returns `{:error, stream}` with the stream
-  unchanged: it never raises (IMPLEMENTING.md U9).
+  is caller misuse, and raises `ArgumentError`, the trap, in every run:
+  this port has no unchecked build (IMPLEMENTING.md U9).
   """
   @spec serialize_reject(stream) :: {:error, stream}
   def serialize_reject(%ReadStream{} = stream), do: {:error, ReadStream.reject(stream)}
-  def serialize_reject(%WriteStream{} = stream), do: {:error, stream}
-  def serialize_reject(%MeasureStream{} = stream), do: {:error, stream}
+
+  def serialize_reject(stream),
+    do: misuse(stream, "serialize_reject on a write or measure stream: reject is read only")
 
   @doc """
   Serializes a nested object (STANDARD.md "object"): calls `fun` with the
@@ -886,7 +944,8 @@ defmodule Serialize do
 
   So a refused read stream always names a reason, and a nested object's
   `{:error, stream}` and `serialize_reject/1` agree. On a write or measure
-  stream `fun`'s result is passed through.
+  stream `fun`'s result is passed through: an `{:error, stream}` there
+  returns the error and records nothing (U9).
   """
   @spec serialize_object(stream, (stream ->
                                     {:ok, stream} | {:ok, stream, value} | {:error, stream})) ::
@@ -947,7 +1006,9 @@ defmodule Serialize do
   outside the closed list — `nil` included — latches `:rejected`, so a
   refused stream never reports none; a stream that already refused keeps
   its first reason. On a write or measure stream it returns
-  `{:error, stream}` with the stream unchanged, and never raises (U9).
+  `{:error, stream}` with the stream unchanged, records nothing, and never
+  raises: it is the path every refusal takes, so a serialize function
+  shared by the read and write sides can call it (U9).
   """
   @spec serialize_fail(stream, term) :: {:error, stream}
   def serialize_fail(%ReadStream{} = stream, reason),

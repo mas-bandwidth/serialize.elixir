@@ -11,11 +11,17 @@ defmodule Serialize.WriteStream do
   the raw-bytes append goes through `BitWriter.pack_bytes/4`, the model's
   single home for that step.
 
-  Writes assume trusted data (STANDARD.md): caller contract violations
-  raise `ArgumentError` — the misuse convention of this implementation —
-  and every operation otherwise succeeds. Use the unified operations in
-  `Serialize`; the methods here are the write-mode primitives they
-  dispatch to.
+  Writes assume trusted data (STANDARD.md): write misuse raises
+  `ArgumentError` at the call, this implementation's trap, in every run —
+  there is no unchecked build — and nothing is latched: the stream has no
+  refusal state (IMPLEMENTING.md U9). Every operation otherwise succeeds.
+
+  The public surface here is `new/0`, `flush/1`, `data/1` and the
+  accessors. The write primitives the unified operations in `Serialize`
+  dispatch to (`serialize_bits/3`, `serialize_integer/4` and the rest) are
+  internal: Elixir cannot hide a function another module calls, so they
+  are `@doc false` and carry no promise (IMPLEMENTING.md U15). Call the
+  operations in `Serialize`.
   """
 
   import Bitwise
@@ -63,7 +69,9 @@ defmodule Serialize.WriteStream do
     end
   end
 
-  @doc "Writes a ranged 32-bit integer as its offset from `min`."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Writes a ranged 32-bit integer as its offset from `min`.
+  @doc false
   @spec serialize_integer(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer(%__MODULE__{} = stream, value, min, max) do
     unless is_integer(value) and value >= min and value <= max do
@@ -76,11 +84,11 @@ defmodule Serialize.WriteStream do
     end
   end
 
-  @doc """
-  Writes a ranged 64-bit integer as its offset from `min`: a single group
-  for 32 bits or fewer, otherwise the low 32 bits first and the high
-  remainder second.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Writes a ranged 64-bit integer as its offset from `min`: a single group
+  # for 32 bits or fewer, otherwise the low 32 bits first and the high
+  # remainder second.
+  @doc false
   @spec serialize_integer64(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer64(%__MODULE__{} = stream, value, min, max) do
     unless is_integer(value) and value >= min and value <= max do
@@ -107,11 +115,11 @@ defmodule Serialize.WriteStream do
     end
   end
 
-  @doc """
-  Writes a ranged 128-bit integer as its offset from `min`, in 32-bit
-  groups from least significant upward, the final group carrying the
-  remainder.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Writes a ranged 128-bit integer as its offset from `min`, in 32-bit
+  # groups from least significant upward, the final group carrying the
+  # remainder.
+  @doc false
   @spec serialize_integer128(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer128(%__MODULE__{} = stream, value, min, max) do
     unless is_integer(value) and value >= min and value <= max do
@@ -132,7 +140,9 @@ defmodule Serialize.WriteStream do
     |> write_groups(offset >>> 32, bits - 32)
   end
 
-  @doc "Writes the low `bits` bits of `value`, `bits` in `[1, 32]`."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Writes the low `bits` bits of `value`, `bits` in `[1, 32]`.
+  @doc false
   @spec serialize_bits(t, non_neg_integer, 1..32) :: {:ok, t, non_neg_integer}
   def serialize_bits(%__MODULE__{} = stream, value, bits) do
     unless is_integer(value) and value >= 0 and value <= (1 <<< bits) - 1 do
@@ -142,7 +152,9 @@ defmodule Serialize.WriteStream do
     {:ok, write_bits_flat(stream, value, bits), value}
   end
 
-  @doc "Aligns, then writes `count` raw bytes."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Aligns, then writes `count` raw bytes.
+  @doc false
   @spec serialize_bytes(t, binary, non_neg_integer) :: {:ok, t, binary}
   def serialize_bytes(%__MODULE__{} = stream, data, count) do
     unless is_binary(data) and byte_size(data) == count do
@@ -165,7 +177,9 @@ defmodule Serialize.WriteStream do
     {:ok, stream, data}
   end
 
-  @doc "Pads with zero bits to the next byte boundary."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Pads with zero bits to the next byte boundary.
+  @doc false
   @spec serialize_align(t) :: {:ok, t}
   def serialize_align(%__MODULE__{} = stream) do
     case rem(stream.bits_written, 8) do
@@ -174,10 +188,10 @@ defmodule Serialize.WriteStream do
     end
   end
 
-  @doc """
-  Writes the end of the object: nothing. The unused bits of the final byte
-  are zero because the flush writes them so.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Writes the end of the object: nothing. The unused bits of the final byte
+  # are zero because the flush writes them so.
+  @doc false
   @spec serialize_end(t) :: {:ok, t}
   def serialize_end(%__MODULE__{} = stream), do: {:ok, stream}
 

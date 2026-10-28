@@ -16,6 +16,9 @@ defmodule Serialize.BitWriter do
   no fixed buffer and no capacity, so writes never overflow. `data/1`
   returns the meaningful bytes — call `flush/1` first, exactly as the
   reference requires.
+
+  The reference's public `BitWriter` (IMPLEMENTING.md U15). `pack_bytes/4`
+  is internal, shared with `Serialize.WriteStream`: `@doc false`, no promise.
   """
 
   import Bitwise
@@ -102,17 +105,17 @@ defmodule Serialize.BitWriter do
     }
   end
 
-  @doc """
-  The raw-bytes append on plain packer state, for a byte-aligned stream —
-  shared with the streams that carry the packer state inline
-  (`Serialize.WriteStream`).
-
-  At byte alignment the scratch holds whole bytes of the current word; its
-  little-endian bytes followed by the payload are the wire bytes from the
-  current word boundary. The completed words are emitted and the partial
-  tail retained as the new scratch, so later writes pack into it exactly as
-  if its bytes had gone through the packer.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # The raw-bytes append on plain packer state, for a byte-aligned stream —
+  # shared with the streams that carry the packer state inline
+  # (`Serialize.WriteStream`).
+  #
+  # At byte alignment the scratch holds whole bytes of the current word; its
+  # little-endian bytes followed by the payload are the wire bytes from the
+  # current word boundary. The completed words are emitted and the partial
+  # tail retained as the new scratch, so later writes pack into it exactly as
+  # if its bytes had gone through the packer.
+  @doc false
   @spec pack_bytes(binary, non_neg_integer, 0..31, binary) :: {binary, non_neg_integer, 0..31}
   def pack_bytes(data, scratch, scratch_bits, bytes) do
     combined = <<scratch::little-size(scratch_bits), bytes::binary>>

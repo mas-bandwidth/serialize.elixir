@@ -34,7 +34,7 @@ Depend on it from git:
 ```elixir
 defp deps do
   [
-    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v2.1.0"}
+    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v2.1.1"}
   ]
 end
 ```
@@ -57,8 +57,9 @@ The complete family operation set in the `Serialize` module, unified
 over three immutable streams — `Serialize.WriteStream`,
 `Serialize.ReadStream` and `Serialize.MeasureStream` — so one serialize
 function per message covers writing, reading and measuring. Every
-operation returns `{:ok, stream, value}` or `{:error, stream}`; writer
-contract violations raise `ArgumentError`; hostile bytes refuse as
+operation returns `{:ok, stream, value}` or `{:error, stream}`; write
+misuse raises `ArgumentError` at the call, the port's trap, in every run,
+and never latches (IMPLEMENTING.md U9); hostile bytes refuse as
 values and never raise. A refusal is terminal — the read stream latches
 failed, and every later read on it refuses — and hands back no value at
 all. Every refusal names its rule from the standard's closed list
@@ -85,7 +86,9 @@ teaches every operation by example.
   decode that is not finite.
 - **Bytes and strings**: `serialize_bytes/3` (aligned bulk copy, count
   agreed, not transmitted); `serialize_string/3` (UTF-8 on the wire,
-  payload validated on read, handed back byte for byte).
+  payload validated on read, handed back byte for byte);
+  `serialize_copy_string/2` bounds text for a string buffer, backed off
+  to a whole character.
 - **The relative integer**: `serialize_int_relative/3` — the flag ladder
   for strictly increasing sequences over the domain `0` to `2^31 - 1`,
   one bit for a difference of 1, and one encoding per value.
@@ -100,6 +103,10 @@ teaches every operation by example.
   covers the 32, 64 and 128 bit domains.
 - **The bitpacker underneath**: `Serialize.BitWriter` and
   `Serialize.BitReader`, the family wire on BEAM binaries.
+- **Language necessities**: `Serialize.Float32`, the float32 rounding and
+  bit casts the BEAM lacks (IMPLEMENTING.md U15). Functions marked
+  `@doc false` (the stream primitives and a few helpers) are internal and
+  carry no promise.
 
 Zero external dependencies.
 
@@ -132,8 +139,8 @@ data = writer |> WriteStream.flush() |> WriteStream.data()
 :trailing_data = Serialize.refusal(reader)
 ```
 
-Writes assume trusted data — caller contract violations raise
-`ArgumentError`. Reads validate always.
+Writes assume trusted data — write misuse raises `ArgumentError` at the
+call and never latches (IMPLEMENTING.md U9). Reads validate always.
 
 ## Toolchain
 

@@ -8,6 +8,9 @@ defmodule Serialize.Bits do
   costs zero bits. BEAM integers are arbitrary precision, so one function
   covers the 32, 64 and 128 bit domains the reference implements as
   `bits_required`, `bits_required64` and `bits_required128`.
+
+  `bits_required/2` is the reference's public helper (IMPLEMENTING.md U15);
+  `bit_length/1` and `mask/1` are internal, `@doc false`, with no promise.
   """
 
   import Bitwise
@@ -24,10 +27,10 @@ defmodule Serialize.Bits do
     bit_length(max - min)
   end
 
-  @doc """
-  The bit length of a non-negative integer: 0 for 0, otherwise the index
-  of the highest set bit plus one.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # The bit length of a non-negative integer: 0 for 0, otherwise the index
+  # of the highest set bit plus one.
+  @doc false
   @spec bit_length(non_neg_integer) :: non_neg_integer
   def bit_length(value) when is_integer(value) and value >= 0 and value <= 0xFFFFFFFF do
     bit_length32(value)
@@ -62,7 +65,9 @@ defmodule Serialize.Bits do
   defp top_bit_length(1), do: 1
   defp top_bit_length(0), do: 0
 
-  @doc "The all-ones mask of the given width."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # The all-ones mask of the given width.
+  @doc false
   @spec mask(non_neg_integer) :: non_neg_integer
   def mask(bits) when is_integer(bits) and bits >= 0, do: (1 <<< bits) - 1
 end

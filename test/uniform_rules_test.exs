@@ -177,31 +177,65 @@ defmodule Serialize.UniformRulesTest do
       end
     end
 
-    test "a compressed_float value too large for a double clamps like an infinity" do
-      for stream <- writers() do
-        assert {:ok, high, _} =
-                 Serialize.serialize_compressed_float(stream, runtime(@huge), 0.0, 10.0, 0.01)
+    test "a compressed_float value that is not finite in float32 raises, never clamps" do
+      # BEAM floats are always finite, so the non-finite values a caller can
+      # pass are the ones the operation's float32 narrowing makes infinite:
+      # a double past FLT_MAX, or an integer too large for a double.
+      for value <- [@huge, -@huge, 1.0e39, -1.0e39, 1.0e300], stream <- writers() do
+        assert_raise ArgumentError, fn ->
+          Serialize.serialize_compressed_float(stream, runtime(value), 0.0, 10.0, 0.01)
+        end
 
-        assert {:ok, low, _} =
-                 Serialize.serialize_compressed_float(stream, runtime(-@huge), 0.0, 10.0, 0.01)
-
-        assert Serialize.bits_processed(high) == 10
-        assert Serialize.bits_processed(low) == 10
+        assert_raise ArgumentError, fn ->
+          Serialize.serialize_compressed_float_precomputed(
+            stream,
+            runtime(value),
+            1000,
+            10,
+            10.0,
+            0.0
+          )
+        end
       end
-
-      {:ok, writer, _} =
-        Serialize.serialize_compressed_float(WriteStream.new(), runtime(@huge), 0.0, 10.0, 0.01)
-
-      data = WriteStream.data(WriteStream.flush(writer))
-
-      assert {:ok, _, 10.0} =
-               Serialize.serialize_compressed_float(ReadStream.new(data), nil, 0.0, 10.0, 0.01)
     end
 
-    test "fail and reject on a write or measure stream return an error and never raise" do
+    test "a finite compressed_float value outside the range still clamps" do
+      for value <- [3.4028234663852886e38, -3.4028234663852886e38, 1.0e20], stream <- writers() do
+        assert {:ok, out, ^value} =
+                 Serialize.serialize_compressed_float(stream, runtime(value), 0.0, 10.0, 0.01)
+
+        assert Serialize.bits_processed(out) == 10
+      end
+    end
+
+    test "fail on a write or measure stream returns an error, records nothing, never raises" do
       for stream <- writers() do
         assert {:error, ^stream} = Serialize.serialize_fail(stream, :past_end)
-        assert {:error, ^stream} = Serialize.serialize_reject(stream)
+        assert {:error, ^stream} = Serialize.serialize_fail(stream, nil)
+        assert {:ok, after_fail, 3} = Serialize.serialize_bits(stream, 3, 2)
+        assert Serialize.bits_processed(after_fail) == 2
+      end
+    end
+
+    test "reject on a write or measure stream raises ArgumentError" do
+      for stream <- writers() do
+        assert_raise ArgumentError, fn -> Serialize.serialize_reject(stream) end
+      end
+    end
+
+    test "a nested object returning an error on write or measure passes through, records nothing" do
+      for stream <- writers() do
+        assert {:error, ^stream} = Serialize.serialize_object(stream, &{:error, &1})
+        assert {:ok, after_object, 1} = Serialize.serialize_bits(stream, 1, 1)
+        assert Serialize.bits_processed(after_object) == 1
+      end
+    end
+
+    test "write misuse records nothing: the stream after a raise writes as a fresh one" do
+      for stream <- writers() do
+        assert_raise ArgumentError, fn -> Serialize.serialize_uint8(stream, runtime(256)) end
+        assert {:ok, out, 7} = Serialize.serialize_uint8(stream, 7)
+        assert Serialize.bits_processed(out) == 8
       end
     end
   end

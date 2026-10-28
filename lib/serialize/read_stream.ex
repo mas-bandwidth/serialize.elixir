@@ -25,10 +25,18 @@ defmodule Serialize.ReadStream do
   stream latches the FIRST refusal's reason beside the flag: `refusal/1`
   reads it. The later refusals of a failed stream are echoes and keep it.
 
-  The caller refuses a read of its own with `reject/1`, which latches
-  `:rejected` (STANDARD.md "Refusal reasons", standard 2.1): the bytes were
-  well formed, and the caller refused the value they carry. It goes through
-  the same latch as every wire refusal, so the first reason wins.
+  The caller refuses a read of its own with `Serialize.serialize_reject/1`,
+  which latches `:rejected` (STANDARD.md "Refusal reasons", standard 2.1):
+  the bytes were well formed, and the caller refused the value they carry.
+  It goes through the same latch as every wire refusal, so the first reason
+  wins.
+
+  The public surface here is `new/1`, `fail/2`, the refusal list and the
+  accessors. The read primitives the unified operations in `Serialize`
+  dispatch to (`serialize_bits/3`, `serialize_integer/4` and the rest) and
+  `reject/1` are internal: Elixir cannot hide a function another module
+  calls, so they are `@doc false` and carry no promise (IMPLEMENTING.md
+  U15). Call the operations in `Serialize`.
   """
 
   import Bitwise
@@ -100,12 +108,12 @@ defmodule Serialize.ReadStream do
 
   def fail(%__MODULE__{} = stream, _reason), do: %{stream | failed: true, refusal: :rejected}
 
-  @doc """
-  The caller's own refusal: latches the stream failed as `:rejected`. The
-  bytes were well formed and the caller refuses the value they carry. On a
-  stream that already failed it changes nothing, and the first reason is
-  kept.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # The caller's own refusal: latches the stream failed as `:rejected`. The
+  # bytes were well formed and the caller refuses the value they carry. On a
+  # stream that already failed it changes nothing, and the first reason is
+  # kept.
+  @doc false
   @spec reject(t) :: t
   def reject(%__MODULE__{} = stream), do: fail(stream, :rejected)
 
@@ -117,10 +125,10 @@ defmodule Serialize.ReadStream do
   @spec refusal(t) :: refusal | nil
   def refusal(%__MODULE__{} = stream), do: stream.refusal
 
-  @doc """
-  Reads a ranged 32-bit integer. The decoded offset must lie within the
-  range — reject, never clamp.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads a ranged 32-bit integer. The decoded offset must lie within the
+  # range — reject, never clamp.
+  @doc false
   @spec serialize_integer(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
   def serialize_integer(%__MODULE__{failed: true} = stream, _value, _min, _max),
     do: {:error, stream}
@@ -143,7 +151,9 @@ defmodule Serialize.ReadStream do
     end
   end
 
-  @doc "Reads a ranged 64-bit integer: low group first, then the remainder."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads a ranged 64-bit integer: low group first, then the remainder.
+  @doc false
   @spec serialize_integer64(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
   def serialize_integer64(%__MODULE__{failed: true} = stream, _value, _min, _max),
     do: {:error, stream}
@@ -165,10 +175,10 @@ defmodule Serialize.ReadStream do
     end
   end
 
-  @doc """
-  Reads a ranged 128-bit integer: 32-bit groups from least significant
-  upward, the final group carrying the remainder.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads a ranged 128-bit integer: 32-bit groups from least significant
+  # upward, the final group carrying the remainder.
+  @doc false
   @spec serialize_integer128(t, term, integer, integer) :: {:ok, t, integer} | {:error, t}
   def serialize_integer128(%__MODULE__{failed: true} = stream, _value, _min, _max),
     do: {:error, stream}
@@ -219,7 +229,9 @@ defmodule Serialize.ReadStream do
     read_groups(data, bits_read + 32, bits - 32, acc ||| group <<< shift, shift + 32)
   end
 
-  @doc "Reads `bits` bits, `bits` in `[1, 32]`."
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads `bits` bits, `bits` in `[1, 32]`.
+  @doc false
   @spec serialize_bits(t, term, 1..32) :: {:ok, t, non_neg_integer} | {:error, t}
   def serialize_bits(%__MODULE__{failed: true} = stream, _value, _bits), do: {:error, stream}
 
@@ -232,10 +244,10 @@ defmodule Serialize.ReadStream do
     end
   end
 
-  @doc """
-  Aligns — verifying the padding bits are zero — then reads `count` raw
-  bytes, compared against the remaining whole bytes.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Aligns — verifying the padding bits are zero — then reads `count` raw
+  # bytes, compared against the remaining whole bytes.
+  @doc false
   @spec serialize_bytes(t, term, integer) :: {:ok, t, binary} | {:error, t}
   def serialize_bytes(%__MODULE__{failed: true} = stream, _data, _count), do: {:error, stream}
 
@@ -260,10 +272,10 @@ defmodule Serialize.ReadStream do
     end
   end
 
-  @doc """
-  Reads an align: the padding bits to the next byte boundary must be
-  present and zero.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads an align: the padding bits to the next byte boundary must be
+  # present and zero.
+  @doc false
   @spec serialize_align(t) :: {:ok, t} | {:error, t}
   def serialize_align(%__MODULE__{failed: true} = stream), do: {:error, stream}
 
@@ -289,14 +301,14 @@ defmodule Serialize.ReadStream do
     end
   end
 
-  @doc """
-  Reads the end of the object (STANDARD.md "end"): the stream ends at the
-  bit index after the last field. A failed stream refuses with its first
-  reason. Then a whole byte or more left over is `:trailing_data` — checked
-  first, so it wins over the padding — and otherwise the 0 to 7 unused bits
-  of the final byte must be zero, else `:nonzero_padding`. An accepted end
-  consumes them, leaving the stream exactly consumed.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # Reads the end of the object (STANDARD.md "end"): the stream ends at the
+  # bit index after the last field. A failed stream refuses with its first
+  # reason. Then a whole byte or more left over is `:trailing_data` — checked
+  # first, so it wins over the padding — and otherwise the 0 to 7 unused bits
+  # of the final byte must be zero, else `:nonzero_padding`. An accepted end
+  # consumes them, leaving the stream exactly consumed.
+  @doc false
   @spec serialize_end(t) :: {:ok, t} | {:error, t}
   def serialize_end(%__MODULE__{failed: true} = stream), do: {:error, stream}
 
