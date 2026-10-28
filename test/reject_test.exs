@@ -41,11 +41,9 @@ defmodule Serialize.RejectTest do
       assert Serialize.refusal(stream) == :past_end
     end
 
-    test "on a write or measure stream refuses without raising and changes nothing" do
-      write = WriteStream.new()
-      measure = MeasureStream.new()
-      assert {:error, ^write} = Serialize.serialize_reject(write)
-      assert {:error, ^measure} = Serialize.serialize_reject(measure)
+    test "on a write or measure stream is caller misuse and raises ArgumentError (U9)" do
+      assert_raise ArgumentError, fn -> Serialize.serialize_reject(WriteStream.new()) end
+      assert_raise ArgumentError, fn -> Serialize.serialize_reject(MeasureStream.new()) end
     end
   end
 
