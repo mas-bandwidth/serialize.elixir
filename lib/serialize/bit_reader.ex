@@ -14,6 +14,9 @@ defmodule Serialize.BitReader do
 
   The reader trusts its callers to check `would_read_past_end?/2` before
   reading, exactly as the reference's streams do.
+
+  The reference's public `BitReader` (IMPLEMENTING.md U15). `decode_bits/3`
+  is internal, shared with `Serialize.ReadStream`: `@doc false`, no promise.
   """
 
   import Bitwise
@@ -49,12 +52,12 @@ defmodule Serialize.BitReader do
      %{reader | bits_read: reader.bits_read + bits}}
   end
 
-  @doc """
-  The window decode itself, on plain values: the `bits` bits of `data` at
-  bit position `bits_read`. The packing model in one place — the streams
-  that carry their position inline (`Serialize.ReadStream`) decode through
-  this too. The caller has already checked the bounds.
-  """
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # The window decode itself, on plain values: the `bits` bits of `data` at
+  # bit position `bits_read`. The packing model in one place — the streams
+  # that carry their position inline (`Serialize.ReadStream`) decode through
+  # this too. The caller has already checked the bounds.
+  @doc false
   @spec decode_bits(binary, non_neg_integer, 1..32) :: non_neg_integer
   def decode_bits(data, bits_read, bits) do
     byte_index = bits_read >>> 3

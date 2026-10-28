@@ -144,15 +144,25 @@ ReadStream.failed?(stream)                     # true
 Serialize.serialize_bits(stream, 0, 1)         # {:error, stream}: 8 bits remain, and it still refuses
 ```
 
-On the write and measure sides, caller contract violations — a value
-outside its declared range, a non-boolean where a boolean is due, an
-invalid declaration, a string that does not fit — raise `ArgumentError`,
-this implementation's misuse convention. The contracts are always on:
-raising is idiomatic BEAM error handling for broken code, and pattern
-matching and guards do most of the checking for free, so the library has
-no separate release shape. Misuse raises at the call site; it never
-reaches the wire. A measure holds the caller to exactly the writer's
-contract, so a measure never prices a message that cannot be written.
+On the write and measure sides, write misuse — a value outside its
+declared range or width, a non-boolean where a boolean is due, a float or
+compressed float value that is not finite in float32, an invalid
+declaration, a string that is not UTF-8, holds a zero byte or does not
+fit, `serialize_reject/1` on a write — raises `ArgumentError` at the call.
+That is this implementation's trap (IMPLEMENTING.md U9). The checks are
+always on: Elixir has no unchecked build, raising is idiomatic BEAM error
+handling for broken code, and pattern matching and guards do most of the
+checking for free. Misuse never reaches the wire, and it never latches: a
+write or measure stream has no refusal state, records no reason, and the
+next call on it writes exactly what it would have. A measure holds the
+caller to exactly the writer's contract by the same trap (U6), so a
+measure never prices a message that cannot be written.
+
+`Serialize.serialize_fail/2` on a write or measure is not misuse: it
+returns `{:error, stream}`, records nothing and never raises, so a
+serialize function shared by the read and write sides can call it. A
+nested object whose function returns `{:error, stream}` on a write or a
+measure returns that error, and records nothing.
 
 On the read side nothing raises. A caller declaration that cannot hold —
 a bit count outside `[1, 64]`, ranged bounds outside their width or with
@@ -301,9 +311,11 @@ family's discriminating vectors pin the decoded bit patterns.
 # decoded value is byte-identical (the round trip is idempotent).
 ```
 
-Finite values outside `[min, max]` clamp on write (an integer too large
-for a double clamps like an infinity); a non-number value or a
-non-finite declaration raises `ArgumentError` (writer contract), and so
+Finite values outside `[min, max]` clamp on write. A value that is not
+finite in float32 — a double past the float32 range, or an integer too
+large for a double — is write misuse and raises `ArgumentError`, never
+clamped (IMPLEMENTING.md U9); so does a non-number value or a
+non-finite declaration (writer contract), and so
 does a declaration whose top integer decodes past the float32 range
 (`min + delta` rounding to an infinity). Reads refuse integers smuggled
 above the quantization ceiling as `:value_out_of_range`, and a decode
@@ -360,6 +372,18 @@ stripped byte order mark, no replacement character, every plane. On write
 and measure, a value that is not a binary, that does not fit
 `buffer_size`, that holds a zero byte or that is not well-formed UTF-8
 raises `ArgumentError`: a writer never sends bytes a reader refuses.
+
+To fit text you do not control into a buffer, bound it first with
+`Serialize.serialize_copy_string(source, dest_size)` (IMPLEMENTING.md
+U15): it returns the bytes before the first zero byte, cut to
+`dest_size - 1` and backed off to a whole UTF-8 character, which
+`serialize_string/3` at `buffer_size = dest_size` accepts. A `dest_size`
+below 1 raises `ArgumentError`.
+
+```elixir
+name = Serialize.serialize_copy_string(player_name, 16)
+{:ok, stream, _} = Serialize.serialize_string(stream, name, 16)
+```
 
 ## The relative integer
 

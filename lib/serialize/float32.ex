@@ -16,6 +16,12 @@ defmodule Serialize.Float32 do
   add, subtract, multiply or divide as the double operation followed by
   `round32/1` is exact, because the double result carries at least
   2 x 24 + 2 significant bits, which makes the second rounding innocuous.
+
+  This module is a language necessity (IMPLEMENTING.md U15): the BEAM has
+  no float32 type, so the float32 rounding and the float bit casts the
+  reference gets from C++ for free are exported here, documented as such.
+  `finite32?/1` and `finite64?/1` are the reference's
+  `float_bits_are_finite` and `double_bits_are_finite`.
   """
 
   import Bitwise
