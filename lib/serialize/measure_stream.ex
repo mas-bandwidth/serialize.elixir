@@ -7,8 +7,13 @@ defmodule Serialize.MeasureStream do
   Stream"): every alignment-performing operation charges the worst-case
   7 bits, so the reported size is sufficient at any starting bit position,
   and everything else charges its exact width. A measure refuses nothing at
-  runtime — it sits on the trusted side of the boundary.
+  runtime — it sits on the trusted side of the boundary — and holds the
+  caller to the writer's contract: a value the write stream would raise on
+  raises `ArgumentError` here too (IMPLEMENTING.md U6, U9), so a measure is
+  never taken of a message that cannot be written.
   """
+
+  import Bitwise
 
   alias Serialize.Bits
 
@@ -23,30 +28,50 @@ defmodule Serialize.MeasureStream do
   @doc "Charges the exact width of a ranged 32-bit integer."
   @spec serialize_integer(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer(%__MODULE__{} = stream, value, min, max) do
+    unless is_integer(value) and value >= min and value <= max do
+      raise ArgumentError, "serialize_int value #{inspect(value)} outside [#{min}, #{max}]"
+    end
+
     {:ok, add(stream, Bits.bits_required(min, max)), value}
   end
 
   @doc "Charges the exact width of a ranged 64-bit integer."
   @spec serialize_integer64(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer64(%__MODULE__{} = stream, value, min, max) do
+    unless is_integer(value) and value >= min and value <= max do
+      raise ArgumentError, "serialize_int64 value #{inspect(value)} outside [#{min}, #{max}]"
+    end
+
     {:ok, add(stream, Bits.bits_required(min, max)), value}
   end
 
   @doc "Charges the exact width of a ranged 128-bit integer."
   @spec serialize_integer128(t, integer, integer, integer) :: {:ok, t, integer}
   def serialize_integer128(%__MODULE__{} = stream, value, min, max) do
+    unless is_integer(value) and value >= min and value <= max do
+      raise ArgumentError, "serialize_int128 value #{inspect(value)} outside [#{min}, #{max}]"
+    end
+
     {:ok, add(stream, Bits.bits_required(min, max)), value}
   end
 
   @doc "Charges `bits` bits, `bits` in `[1, 32]`."
   @spec serialize_bits(t, non_neg_integer, 1..32) :: {:ok, t, non_neg_integer}
   def serialize_bits(%__MODULE__{} = stream, value, bits) do
+    unless is_integer(value) and value >= 0 and value <= (1 <<< bits) - 1 do
+      raise ArgumentError, "serialize_bits value #{inspect(value)} does not fit #{bits} bits"
+    end
+
     {:ok, add(stream, bits), value}
   end
 
   @doc "Charges the worst-case align, then `count` whole bytes."
   @spec serialize_bytes(t, binary, non_neg_integer) :: {:ok, t, binary}
   def serialize_bytes(%__MODULE__{} = stream, data, count) do
+    unless is_binary(data) and byte_size(data) == count do
+      raise ArgumentError, "serialize_bytes data does not match count #{inspect(count)}"
+    end
+
     {:ok, stream} = serialize_align(stream)
     {:ok, add(stream, count * 8), data}
   end

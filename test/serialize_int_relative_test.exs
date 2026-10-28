@@ -124,13 +124,13 @@ defmodule Serialize.IntRelativeTest do
              Serialize.serialize_int_relative(WriteStream.new(), 0x7FFFFFFE, 0x7FFFFFFF)
 
     # `previous` is caller state and never arrives off the wire, so one
-    # outside the domain is caller error, checked here by the guard — a
+    # outside the domain is caller error, raising on write — a
     # 64-bit or unsigned 2^31 is caller error exactly as a negative one is
-    assert_raise FunctionClauseError, fn ->
+    assert_raise ArgumentError, fn ->
       Serialize.serialize_int_relative(WriteStream.new(), -1, 5)
     end
 
-    assert_raise FunctionClauseError, fn ->
+    assert_raise ArgumentError, fn ->
       Serialize.serialize_int_relative(WriteStream.new(), 0x8000_0000, 0x8000_0001)
     end
 

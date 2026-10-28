@@ -149,6 +149,9 @@ defmodule Serialize.ConformanceRunner do
         # the sequences that spell a successor
         stream = assert_terminal(vector, stream)
 
+        if Path.basename(vector.file) == "object.txt",
+          do: assert_object_probes(vector, stream, nodes)
+
         # the later refusals were echoes: the first reason stands
         assert_reason(vector, stream, reason, index)
         {:refused, stream}
@@ -186,6 +189,92 @@ defmodule Serialize.ConformanceRunner do
         )
     end
   end
+
+  # The reference runner's object probes, run for every refused vector in
+  # object.txt: an object on the refused stream refuses without calling its
+  # function or touching the stream; on a fresh stream, a function that
+  # returns failure on its own latches rejected, terminally; and a function
+  # that swallows an inner refusal and returns success still refuses, with
+  # the inner reason.
+  defp assert_object_probes(vector, stream, nodes) do
+    before = {Serialize.bits_processed(stream), Serialize.refusal(stream)}
+
+    {result, called} = probe_object(stream, &{:ok, &1})
+    probe!(vector, match?({:error, _}, result), "an object read after the refusal was accepted")
+    probe!(vector, not called, "the object read after the refusal invoked its function")
+    {:error, after_object} = result
+
+    probe!(
+      vector,
+      {Serialize.bits_processed(after_object), Serialize.refusal(after_object)} == before,
+      "the object read after the refusal changed the cursor or the reason"
+    )
+
+    {result, _called} = probe_object(read_stream(vector.bytes), &{:error, &1})
+    probe!(vector, match?({:error, _}, result), "an object accepted a function returning failure")
+    {:error, rejected} = result
+
+    probe!(
+      vector,
+      Serialize.refusal(rejected) == :rejected,
+      "an object whose function failed on its own did not latch rejected"
+    )
+
+    probe!(
+      vector,
+      match?({:error, _}, Serialize.serialize_int(rejected, @sentinel, 7, 7)),
+      "a zero-bit read succeeded after the object's rejection"
+    )
+
+    {result, called} = probe_object(rejected, &{:ok, &1})
+
+    probe!(
+      vector,
+      match?({:error, _}, result) and not called,
+      "an object after the rejection was accepted or invoked its function"
+    )
+
+    {:error, rejected} = Serialize.serialize_bits(rejected, @sentinel, 8)
+
+    probe!(
+      vector,
+      Serialize.refusal(rejected) == :rejected,
+      "the reads after the rejection overwrote rejected"
+    )
+
+    swallowing = fn stream ->
+      case run_nodes(stream, nodes) do
+        {:ok, stream, _values} -> {:ok, stream}
+        {:error, stream, _index, _step} -> {:ok, stream}
+      end
+    end
+
+    result = Serialize.serialize_object(read_stream(vector.bytes), swallowing)
+    probe!(vector, match?({:error, _}, result), "an object accepted a swallowed inner refusal")
+    {:error, swallowed} = result
+
+    probe!(
+      vector,
+      Serialize.refusal(swallowed) == elem(before, 1),
+      "an object did not keep the inner refusal its function swallowed"
+    )
+  end
+
+  defp probe_object(stream, fun) do
+    called = make_ref()
+    Process.put(called, false)
+
+    result =
+      Serialize.serialize_object(stream, fn stream ->
+        Process.put(called, true)
+        fun.(stream)
+      end)
+
+    {result, Process.delete(called)}
+  end
+
+  defp probe!(_vector, true, _message), do: :ok
+  defp probe!(vector, false, message), do: flunk("#{vector.name}: #{message} [#{vector.file}]")
 
   defp assert_reason(vector, stream, reason, index) do
     actual = Serialize.refusal(stream)
@@ -313,32 +402,48 @@ defmodule Serialize.ConformanceRunner do
 
   # STANDARD.md, "object": the nested object's own serialize function is
   # invoked inline and contributes NO BYTES OF ITS OWN -- composition, not
-  # an encoding, with no framing, length prefix or alignment around it. In
-  # this port composition is a function call and nothing else, so the
-  # nested steps run through one here, exactly as a caller's own nested
-  # serialize function would.
+  # an encoding, with no framing, length prefix or alignment around it. The
+  # nested steps run as the serialize function `Serialize.serialize_object/2`
+  # calls, exactly as a caller's own nested serialize function would, and
+  # that function fails at its first refused step.
   #
-  # The composition is still a read on the stream, so it keeps the stream's
-  # terminality as the reference's serialize_object does: a refused read
-  # stream refuses the object on entry and on exit, with the latched reason,
-  # even when the object is empty and its steps consume nothing.
+  # A `reject` step directly inside the object is the function returning
+  # failure there without refusing on its own, which the object must latch
+  # as `rejected`; at the top level it is `Serialize.serialize_reject/1`.
+  #
+  # The reference runner's probe for terminality: an object that refuses on
+  # a stream that was already refused, AFTER calling its function, is
+  # reported as accepted -- a conforming object refuses on entry and never
+  # calls it.
   defp run_node(stream, %{kind: :object, steps: children} = node) do
-    if failed?(stream) do
-      {:error, stream, node}
-    else
-      case run_nodes(stream, children) do
-        {:ok, stream, values} ->
-          if failed?(stream),
-            do: {:error, stream, node},
-            else: {:ok, stream, [@no_value | values]}
+    already_failed = failed?(stream)
+    children = Enum.map(children, &callback_reject/1)
+    called = make_ref()
+    Process.put(called, false)
 
-        {:error, stream, _index, step} ->
-          {:error, stream, step}
+    object = fn stream ->
+      Process.put(called, true)
+
+      case run_nodes(stream, children) do
+        {:ok, stream, values} -> {:ok, stream, values}
+        {:error, stream, _index, _step} -> {:error, stream}
       end
+    end
+
+    result = Serialize.serialize_object(stream, object)
+    was_called = Process.delete(called)
+
+    case result do
+      {:ok, stream, values} -> {:ok, stream, [@no_value | values]}
+      {:error, stream} when already_failed and was_called -> {:ok, stream, [@no_value]}
+      {:error, stream} -> {:error, stream, node}
     end
   end
 
   defp run_node(stream, step), do: run_step(stream, step)
+
+  defp callback_reject(%{kind: :reject} = step), do: %{step | kind: :callback_rejects}
+  defp callback_reject(step), do: step
 
   defp failed?(%ReadStream{} = stream), do: ReadStream.failed?(stream)
   defp failed?(_stream), do: false
@@ -357,6 +462,13 @@ defmodule Serialize.ConformanceRunner do
 
   defp run_step(stream, %{kind: :end} = step),
     do: wrap(step, Serialize.serialize_end(stream))
+
+  defp run_step(stream, %{kind: :reject} = step),
+    do: wrap(step, Serialize.serialize_reject(stream))
+
+  # the object's function returning failure without refusing: nothing
+  # touches the stream
+  defp run_step(stream, %{kind: :callback_rejects} = step), do: {:error, stream, step}
 
   defp run_step(stream, %{kind: :int} = step),
     do: wrap(step, Serialize.serialize_int(stream, step.value, step.min, step.max))
@@ -511,6 +623,7 @@ defmodule Serialize.ConformanceRunner do
       ["bool"] -> %{kind: :bool, value: @sentinel}
       ["align"] -> %{kind: :align, value: @sentinel}
       ["end"] -> %{kind: :end, value: @sentinel}
+      ["reject"] -> %{kind: :reject, value: @sentinel}
       ["float"] -> %{kind: :float, value: @sentinel}
       ["double"] -> %{kind: :double, value: @sentinel}
       ["uint128"] -> %{kind: :uint128, value: @sentinel}

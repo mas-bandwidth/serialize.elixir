@@ -28,12 +28,15 @@ defmodule Serialize do
 
   Every refusal names its rule from STANDARD.md's closed list — `:past_end`,
   `:value_out_of_range`, `:nonzero_padding`, `:trailing_data`,
-  `:non_finite_float`, `:invalid_utf8`, `:embedded_nul` and `:non_canonical`
-  — and the stream keeps the first one: `refusal/1` reads it.
+  `:non_finite_float`, `:invalid_utf8`, `:embedded_nul`, `:non_canonical`
+  and `:rejected` — and the stream keeps the first one: `refusal/1` reads
+  it. `:rejected` is the caller's own refusal, made with
+  `serialize_reject/1`.
 
-  Compose messages with plain function calls (`with` chains); the
-  reference's `serialize_object` is composition, contributes no bytes, and
-  needs no operation here. A packet reader ends the top-level object with
+  Compose messages with `serialize_object/2`, which calls a nested
+  object's serialize function inline and contributes no bytes; it keeps a
+  failed stream terminal and latches `:rejected` when the nested function
+  refuses on its own. A packet reader ends the top-level object with
   `serialize_end/1`, which refuses trailing bytes and set padding, so one
   value has exactly one byte sequence.
 
@@ -86,16 +89,7 @@ defmodule Serialize do
 
   def serialize_bits(%WriteStream{} = stream, value, bits)
       when is_integer(bits) and bits > 32 and bits <= 64 do
-    unless is_integer(value) and value >= 0 and value <= @uint64_max do
-      raise ArgumentError, "serialize_bits value must be an integer in [0, 2^64-1]"
-    end
-
-    # the reference's truncation check is per 32-bit group: the low group
-    # truncates silently, the high group must fit its width
-    unless value >>> 32 <= Bits.mask(bits - 32) do
-      raise ArgumentError, "serialize_bits value #{value} does not fit #{bits} bits"
-    end
-
+    check_wide_bits!(value, bits)
     {:ok, stream, _} = WriteStream.serialize_bits(stream, value &&& 0xFFFFFFFF, 32)
     {:ok, stream, _} = WriteStream.serialize_bits(stream, value >>> 32, bits - 32)
     {:ok, stream, value}
@@ -111,9 +105,22 @@ defmodule Serialize do
 
   def serialize_bits(%MeasureStream{} = stream, value, bits)
       when is_integer(bits) and bits > 32 and bits <= 64 do
+    check_wide_bits!(value, bits)
     {:ok, stream, _} = MeasureStream.serialize_bits(stream, 0, 32)
     {:ok, stream, _} = MeasureStream.serialize_bits(stream, 0, bits - 32)
     {:ok, stream, value}
+  end
+
+  # a bit count outside [1, 64] is a bad declaration (IMPLEMENTING.md U16)
+  def serialize_bits(stream, _value, bits),
+    do: misuse(stream, "serialize_bits bits must be an integer in [1, 64], got #{inspect(bits)}")
+
+  # The write and measure check of a value wider than 32 bits (U6, U8): the
+  # value is checked as the caller passed it, before it is split into groups.
+  defp check_wide_bits!(value, bits) do
+    unless is_integer(value) and value >= 0 and value <= Bits.mask(bits) do
+      raise ArgumentError, "serialize_bits value #{inspect(value)} does not fit #{bits} bits"
+    end
   end
 
   @doc "Serializes an unsigned 8-bit integer: `serialize_bits/3` at width 8."
@@ -208,6 +215,14 @@ defmodule Serialize do
     MeasureStream.serialize_integer(stream, value, min, max)
   end
 
+  # bounds outside int32, or min above max (U5, U16)
+  def serialize_int(stream, _value, min, max),
+    do:
+      misuse(
+        stream,
+        "serialize_int bounds must be int32 with min <= max, got [#{inspect(min)}, #{inspect(max)}]"
+      )
+
   @doc """
   Serializes a ranged 64-bit integer: a single group for 32 bits or fewer,
   otherwise the low 32 bits then the high remainder. Not to be confused
@@ -219,6 +234,13 @@ defmodule Serialize do
              min <= max do
     smod(stream).serialize_integer64(stream, value, min, max)
   end
+
+  def serialize_int64(stream, _value, min, max),
+    do:
+      misuse(
+        stream,
+        "serialize_int64 bounds must be int64 with min <= max, got [#{inspect(min)}, #{inspect(max)}]"
+      )
 
   @doc """
   Serializes a ranged 128-bit integer in 32-bit groups from least
@@ -234,6 +256,13 @@ defmodule Serialize do
              min <= max do
     smod(stream).serialize_integer128(stream, value, min, max)
   end
+
+  def serialize_int128(stream, _value, min, max),
+    do:
+      misuse(
+        stream,
+        "serialize_int128 bounds must be int128 with min <= max, got [#{inspect(min)}, #{inspect(max)}]"
+      )
 
   # ------------------------------------------------------------------
   # floating point
@@ -257,6 +286,9 @@ defmodule Serialize do
     end
   end
 
+  def serialize_float(_stream, value) when not is_float(value),
+    do: raise(ArgumentError, "serialize_float value must be a float, got #{inspect(value)}")
+
   def serialize_float(stream, value) do
     {:ok, stream, _pattern} = serialize_bits(stream, Float32.bits32(value), 32)
     {:ok, stream, value}
@@ -279,6 +311,9 @@ defmodule Serialize do
     end
   end
 
+  def serialize_double(_stream, value) when not is_float(value),
+    do: raise(ArgumentError, "serialize_double value must be a float, got #{inspect(value)}")
+
   def serialize_double(stream, value) do
     {:ok, stream, _pattern} = serialize_bits(stream, Float32.bits64(value), 64)
     {:ok, stream, value}
@@ -294,11 +329,129 @@ defmodule Serialize do
   and a decode that is not finite as `:non_finite_float`, whatever the
   declaration. Lossy by construction: a round trip returns the nearest
   representable quantum.
+
+  A declaration that is not a number, not finite in float32, or not
+  `min < max` and `res > 0` refuses on read as `:value_out_of_range` before
+  any bits move (IMPLEMENTING.md U16), and raises `ArgumentError` on write
+  and measure. The derivation is `compressed_float_params/3`, and
+  `serialize_compressed_float_precomputed/6` takes its constants.
   """
   @spec serialize_compressed_float(stream, number, number, number, number) :: result(float)
   def serialize_compressed_float(stream, value, min, max, res) do
-    {miv, bits, delta, min32} = compressed_float_params(min, max, res)
+    with {:ok, {miv, bits, delta}} <- compressed_float_params(min, max, res),
+         {:ok, min32} <- declaration32(min, "min") do
+      compressed_float(stream, value, miv, bits, delta, min32)
+    else
+      {:error, message} -> misuse(stream, message)
+    end
+  end
 
+  @doc """
+  Derives the compressed float wire constants from a `(min, max, res)`
+  declaration (the reference's `serialize_compressed_float_params`):
+  `{:ok, {max_integer_value, bits, delta}}`, where `max_integer_value` is the
+  step count `ceil((max - min) / res)` clamped to `[1, 4294967040]`, `bits`
+  is `bits_required(0, max_integer_value)`, and `delta` is `max - min`
+  rounded to float32. The constants depend only on the declaration, so a
+  caller or a schema compiler derives them once and passes them to
+  `serialize_compressed_float_precomputed/6` at every call.
+
+  A declaration that is not a number, not finite in float32, or not
+  `min < max` and `res > 0` is `{:error, message}`: it never raises.
+  """
+  @spec compressed_float_params(number, number, number) ::
+          {:ok, {pos_integer, 1..32, float}} | {:error, String.t()}
+  def compressed_float_params(min, max, res) do
+    with {:ok, min32} <- declaration32(min, "min"),
+         {:ok, max32} <- declaration32(max, "max"),
+         {:ok, res32} <- declaration32(res, "res"),
+         :ok <- ordered(min32 < max32 and res32 > 0),
+         {:ok, delta} <- declaration32(max32 - min32, "delta"),
+         {:ok, values} <- declaration32(delta / res32, "delta / res") do
+      values =
+        cond do
+          values < 1.0 -> 1.0
+          # largest float32 below 2^32
+          values > 4_294_967_040.0 -> 4_294_967_040.0
+          true -> values
+        end
+
+      max_integer_value = trunc(Float.ceil(values))
+      {:ok, {max_integer_value, Bits.bits_required(0, max_integer_value), delta}}
+    end
+  end
+
+  @doc """
+  Serializes a compressed float from precomputed wire constants (the
+  reference's `serialize_compressed_float_precomputed`): the constants are
+  exactly what `compressed_float_params/3` derives from a declaration, and
+  the bytes are identical to `serialize_compressed_float/5` over that
+  declaration.
+
+  Constants that cannot have been derived — `max_integer_value` outside
+  `[1, 4294967040]`, `bits` other than `bits_required(0,
+  max_integer_value)`, a `delta` that is not positive and finite in float32,
+  or a `min` that is not finite in float32 — raise on write and measure and
+  refuse as `:value_out_of_range` on read, before any bits move
+  (IMPLEMENTING.md U16).
+  """
+  @spec serialize_compressed_float_precomputed(stream, number, pos_integer, 1..32, number, number) ::
+          result(float)
+  def serialize_compressed_float_precomputed(stream, value, miv, bits, delta, min) do
+    with :ok <- precomputed_constants(miv, bits),
+         {:ok, delta32} <- declaration32(delta, "delta"),
+         :ok <- positive_delta(delta32),
+         {:ok, min32} <- declaration32(min, "min") do
+      compressed_float(stream, value, miv, bits, delta32, min32)
+    else
+      {:error, message} -> misuse(stream, message)
+    end
+  end
+
+  defp precomputed_constants(miv, bits)
+       when is_integer(miv) and miv >= 1 and miv <= 4_294_967_040 and is_integer(bits) do
+    if bits == Bits.bits_required(0, miv),
+      do: :ok,
+      else:
+        {:error, "serialize_compressed_float bits must be bits_required(0, max_integer_value)"}
+  end
+
+  defp precomputed_constants(_miv, _bits),
+    do:
+      {:error,
+       "serialize_compressed_float max_integer_value must be an integer in [1, 4294967040]"}
+
+  defp positive_delta(delta) when delta > 0.0, do: :ok
+  defp positive_delta(_delta), do: {:error, "serialize_compressed_float delta must be positive"}
+
+  defp ordered(true), do: :ok
+  defp ordered(false), do: {:error, "serialize_compressed_float requires min < max and res > 0"}
+
+  # A declaration parameter as a float32-rounded double, or an error: never
+  # an exception, whatever the caller passed (U7, U16).
+  defp declaration32(value, name) do
+    with {:ok, float} <- to_double(value),
+         rounded when is_float(rounded) <- Float32.round32(float) do
+      {:ok, rounded}
+    else
+      _ -> {:error, "serialize_compressed_float #{name} must be a number finite in float32"}
+    end
+  end
+
+  # A number as a double. An integer too large for a double is :error,
+  # never the ArithmeticError the conversion raises.
+  defp to_double(value) when is_float(value), do: {:ok, value}
+
+  defp to_double(value) when is_integer(value) do
+    {:ok, value * 1.0}
+  rescue
+    ArithmeticError -> :error
+  end
+
+  defp to_double(_value), do: :error
+
+  # The one body behind both entry points, over validated constants.
+  defp compressed_float(stream, value, miv, bits, delta, min32) do
     integer_value =
       if writing?(stream) do
         unless is_number(value) do
@@ -339,45 +492,23 @@ defmodule Serialize do
 
   defp read_compressed_float(stream, decoded), do: {:ok, stream, decoded}
 
-  # Derives the wire constants from a declaration, mirroring
-  # serialize_compressed_float_params: every step float32, the parameters
-  # rounding at this boundary exactly as the reference's float parameters
-  # do. A declaration whose delta or step count is not finite in float32 is
-  # non-conforming and raises.
-  defp compressed_float_params(min, max, res)
-       when is_number(min) and is_number(max) and is_number(res) do
-    min32 = Float32.round32!(min * 1.0)
-    max32 = Float32.round32!(max * 1.0)
-    res32 = Float32.round32!(res * 1.0)
-
-    unless min32 < max32 and res32 > 0 do
-      raise ArgumentError, "serialize_compressed_float requires min < max and res > 0"
-    end
-
-    delta = Float32.round32!(max32 - min32)
-    values = Float32.round32!(delta / res32)
-
-    values =
-      cond do
-        values < 1.0 -> 1.0
-        # largest float32 below 2^32
-        values > 4_294_967_040.0 -> 4_294_967_040.0
-        true -> values
-      end
-
-    max_integer_value = trunc(Float.ceil(values))
-    {max_integer_value, Bits.bits_required(0, max_integer_value), delta, min32}
-  end
-
   # The writer's quantization, exactly the reference's float32 steps: the
   # normalized value clamps to [0,1], the product rounds to float32 BEFORE
   # 0.5 is added, that sum rounds before the floor, and the floored integer
   # clamps to the step count (the normative integer clamp, STANDARD.md
   # 2026-08-23). A value whose float32 form overflows behaves as the
-  # reference's infinity does: it clamps.
+  # reference's infinity does: it clamps, and so does an integer too large
+  # for a double.
   defp compressed_float_quantize(value, min32, delta, miv) do
+    value32 =
+      case to_double(value) do
+        {:ok, float} -> Float32.round32(float)
+        :error when value > 0 -> :pos_inf
+        :error -> :neg_inf
+      end
+
     difference =
-      case Float32.round32(value * 1.0) do
+      case value32 do
         :pos_inf -> :pos_inf
         :neg_inf -> :neg_inf
         v32 -> Float32.round32(v32 - min32)
@@ -437,7 +568,8 @@ defmodule Serialize do
 
   The domain is `0` to `2^31 - 1` inclusive, and both `previous` and
   `current` lie in it. `previous` is caller state and never arrives off the
-  wire, so one outside the domain is caller error: the guard rejects it.
+  wire, so one outside the domain is caller error: it raises on write and
+  measure and refuses as `:value_out_of_range` on read.
   The reader reconstructs `current` on BEAM integers, which cannot wrap at
   any width, then refuses the read as `:value_out_of_range` unless the
   result lies in the domain and is strictly greater than `previous` — in
@@ -470,6 +602,14 @@ defmodule Serialize do
       end
     end
   end
+
+  # `previous` outside the domain is a bad declaration (U7, U16)
+  def serialize_int_relative(stream, previous, _current),
+    do:
+      misuse(
+        stream,
+        "serialize_int_relative previous must be in [0, 2^31-1], got #{inspect(previous)}"
+      )
 
   defp relative_tiers(stream, previous, current, difference, [{lo, hi} | rest]) do
     with {:ok, stream, flag} <- serialize_bool(stream, writing?(stream) and difference <= hi) do
@@ -541,8 +681,13 @@ defmodule Serialize do
   @spec serialize_fixed(stream, integer, pos_integer, non_neg_integer, integer, integer) ::
           result(integer)
   def serialize_fixed(stream, value, integer_bits, fraction_bits, min, max) do
-    {raw_min, raw_max} = fixed_params(integer_bits, fraction_bits, min, max)
-    smod(stream).serialize_integer128(stream, value, raw_min, raw_max)
+    case fixed_params(integer_bits, fraction_bits, min, max) do
+      {:ok, raw_min, raw_max} ->
+        smod(stream).serialize_integer128(stream, value, raw_min, raw_max)
+
+      {:error, message} ->
+        misuse(stream, message)
+    end
   end
 
   # The declaration arithmetic: the Q format must fill one of the storage
@@ -550,32 +695,34 @@ defmodule Serialize do
   # capacity — signed when min is negative, with the sign bit counting
   # toward integer_bits — and the raw bounds are the whole-unit bounds
   # scaled. All one lane: BEAM integers cover every storage width.
+  # A declaration that does not hold is returned, never raised: the caller
+  # raises on write and measure and refuses on read (U16).
   defp fixed_params(integer_bits, fraction_bits, min, max) do
-    unless is_integer(integer_bits) and integer_bits >= 1 and is_integer(fraction_bits) and
-             fraction_bits >= 0 and (integer_bits + fraction_bits) in [8, 16, 32, 64, 128] do
-      raise ArgumentError,
-            "serialize_fixed integer_bits + fraction_bits must equal a storage width (8/16/32/64/128)"
+    cond do
+      not (is_integer(integer_bits) and integer_bits >= 1 and is_integer(fraction_bits) and
+             fraction_bits >= 0 and (integer_bits + fraction_bits) in [8, 16, 32, 64, 128]) ->
+        {:error,
+         "serialize_fixed integer_bits + fraction_bits must equal a storage width (8/16/32/64/128)"}
+
+      not (is_integer(min) and is_integer(max) and min >= @int64_min and max <= @int64_max and
+               min <= max) ->
+        {:error, "serialize_fixed bounds must be int64 whole units with min <= max"}
+
+      not fixed_capacity_ok?(integer_bits, min, max) ->
+        {:error, "serialize_fixed bounds in whole units do not fit the Q format"}
+
+      true ->
+        {:ok, min <<< fraction_bits, max <<< fraction_bits}
     end
-
-    unless is_integer(min) and is_integer(max) and min >= @int64_min and max <= @int64_max and
-             min <= max do
-      raise ArgumentError, "serialize_fixed bounds must be int64 whole units with min <= max"
-    end
-
-    capacity_ok? =
-      if min < 0 do
-        (integer_bits >= 65 or min >= -(1 <<< (integer_bits - 1))) and
-          (integer_bits >= 64 or max <= (1 <<< (integer_bits - 1)) - 1)
-      else
-        integer_bits >= 64 or max <= (1 <<< integer_bits) - 1
-      end
-
-    unless capacity_ok? do
-      raise ArgumentError, "serialize_fixed bounds in whole units do not fit the Q format"
-    end
-
-    {min <<< fraction_bits, max <<< fraction_bits}
   end
+
+  defp fixed_capacity_ok?(integer_bits, min, max) when min < 0 do
+    (integer_bits >= 65 or min >= -(1 <<< (integer_bits - 1))) and
+      (integer_bits >= 64 or max <= (1 <<< (integer_bits - 1)) - 1)
+  end
+
+  defp fixed_capacity_ok?(integer_bits, _min, max),
+    do: integer_bits >= 64 or max <= (1 <<< integer_bits) - 1
 
   # ------------------------------------------------------------------
   # align, bytes, strings
@@ -597,7 +744,8 @@ defmodule Serialize do
   come back as a sub-binary of the stream's data.
   """
   @spec serialize_bytes(stream, binary | nil, non_neg_integer) :: result(binary)
-  def serialize_bytes(%WriteStream{} = stream, data, count) when is_integer(count) do
+  def serialize_bytes(%WriteStream{} = stream, data, count)
+      when is_integer(count) and count >= 0 do
     WriteStream.serialize_bytes(stream, data, count)
   end
 
@@ -605,16 +753,26 @@ defmodule Serialize do
     ReadStream.serialize_bytes(stream, data, count)
   end
 
-  def serialize_bytes(%MeasureStream{} = stream, data, count) when is_integer(count) do
+  def serialize_bytes(%MeasureStream{} = stream, data, count)
+      when is_integer(count) and count >= 0 do
     MeasureStream.serialize_bytes(stream, data, count)
   end
+
+  # a count that is not a non-negative integer (U7, U16)
+  def serialize_bytes(stream, _data, count),
+    do:
+      misuse(
+        stream,
+        "serialize_bytes count must be a non-negative integer, got #{inspect(count)}"
+      )
 
   @doc """
   Serializes a UTF-8 string (STANDARD.md "string"): the length as
   `serialize_int(length, 0, buffer_size - 1)`, then the bytes via the
   aligning bytes operation. The payload is well-formed UTF-8 with no
-  interior NUL by writer contract — unchecked on write, per the trusted
-  writes doctrine — and the reader refuses a payload violating either rule:
+  interior NUL by writer contract, checked on write and measure with the
+  rest of the writer's contract (IMPLEMENTING.md U4) — and the reader
+  refuses a payload violating either rule:
   a length past the buffer as `:value_out_of_range`, a zero byte as
   `:embedded_nul`, then malformed UTF-8 as `:invalid_utf8`. An accepted
   payload comes back exactly as read: no normalization, no replacement and
@@ -627,6 +785,11 @@ defmodule Serialize do
       if writing?(stream) do
         unless is_binary(value) and byte_size(value) < buffer_size do
           raise ArgumentError, "serialize_string value must be a binary shorter than buffer_size"
+        end
+
+        # U3 and U4: the writer sends only what every reader accepts
+        unless :binary.match(value, <<0>>) == :nomatch and String.valid?(value) do
+          raise ArgumentError, "serialize_string value must be UTF-8 with no zero byte"
         end
 
         byte_size(value)
@@ -651,6 +814,14 @@ defmodule Serialize do
     end
   end
 
+  # a buffer_size below 1 or past int32 (U7, U16)
+  def serialize_string(stream, _value, buffer_size),
+    do:
+      misuse(
+        stream,
+        "serialize_string buffer_size must be an integer in [1, 2^31-1], got #{inspect(buffer_size)}"
+      )
+
   # ------------------------------------------------------------------
   # end
   # ------------------------------------------------------------------
@@ -670,6 +841,77 @@ defmodule Serialize do
   def serialize_end(%MeasureStream{} = stream), do: MeasureStream.serialize_end(stream)
 
   # ------------------------------------------------------------------
+  # the caller's refusal, and object composition
+  # ------------------------------------------------------------------
+
+  @doc """
+  The caller's own refusal (STANDARD.md "Refusal reasons", `rejected`): the
+  bytes were well formed, every primitive accepted them, and the caller's
+  own validation says no — an enum value the game does not know, two fields
+  that contradict each other. On a read stream it latches `:rejected` and
+  returns `{:error, stream}`; the refusal is terminal like every other, and
+  on a stream that already refused the first reason is kept.
+
+      with {:ok, stream, kind} <- Serialize.serialize_bits(stream, kind, 4) do
+        if kind in @known_kinds, do: {:ok, stream, kind}, else: Serialize.serialize_reject(stream)
+      end
+
+  Rejecting only means something on read. On a write or measure stream it
+  is caller misuse, and returns `{:error, stream}` with the stream
+  unchanged: it never raises (IMPLEMENTING.md U9).
+  """
+  @spec serialize_reject(stream) :: {:error, stream}
+  def serialize_reject(%ReadStream{} = stream), do: {:error, ReadStream.reject(stream)}
+  def serialize_reject(%WriteStream{} = stream), do: {:error, stream}
+  def serialize_reject(%MeasureStream{} = stream), do: {:error, stream}
+
+  @doc """
+  Serializes a nested object (STANDARD.md "object"): calls `fun` with the
+  stream, inline. The object contributes no bytes of its own — no framing,
+  length prefix or alignment — so this is composition, and the bytes are
+  exactly those `fun` reads or writes.
+
+  `fun` is the object's own serialize function, the same single function
+  for writing, reading and measuring. It returns `{:ok, stream}`,
+  `{:ok, stream, value}` or `{:error, stream}`, and this returns what it
+  returned, with these rules on a read stream:
+
+    * a stream that already refused refuses on entry, with its first
+      reason, and `fun` is never called;
+    * `fun` returning `{:error, stream}` with nothing latched is the
+      caller's refusal, and the stream latches `:rejected`; when a read
+      inside `fun` already refused, that first reason is kept;
+    * `fun` returning success on a stream that failed inside it refuses
+      too, with the reason that failed it.
+
+  So a refused read stream always names a reason, and a nested object's
+  `{:error, stream}` and `serialize_reject/1` agree. On a write or measure
+  stream `fun`'s result is passed through.
+  """
+  @spec serialize_object(stream, (stream ->
+                                    {:ok, stream} | {:ok, stream, value} | {:error, stream})) ::
+          {:ok, stream} | {:ok, stream, value} | {:error, stream}
+        when value: term
+  def serialize_object(%ReadStream{failed: true} = stream, fun) when is_function(fun, 1),
+    do: {:error, stream}
+
+  def serialize_object(%ReadStream{} = stream, fun) when is_function(fun, 1) do
+    case fun.(stream) do
+      {:ok, %ReadStream{failed: false}} = ok -> ok
+      {:ok, %ReadStream{failed: false}, _value} = ok -> ok
+      {_result, %ReadStream{} = stream} -> {:error, latch_object(stream)}
+      {_result, %ReadStream{} = stream, _value} -> {:error, latch_object(stream)}
+    end
+  end
+
+  def serialize_object(stream, fun) when is_function(fun, 1), do: fun.(stream)
+
+  # The object's latch: through the same latch as every refusal, so a
+  # reason already latched inside the object is kept, and an object that
+  # refused on its own latches rejected.
+  defp latch_object(stream), do: ReadStream.fail(stream, :rejected)
+
+  # ------------------------------------------------------------------
   # stream accessors
   # ------------------------------------------------------------------
 
@@ -687,6 +929,32 @@ defmodule Serialize do
   """
   @spec refusal(ReadStream.t()) :: ReadStream.refusal() | nil
   def refusal(%ReadStream{} = stream), do: ReadStream.refusal(stream)
+
+  @doc """
+  The family spelling of a read stream's refusal (IMPLEMENTING.md U14):
+  `"past_end"`, `"value_out_of_range"` and the rest of
+  `Serialize.ReadStream.refusals/0` as strings, and `"none"` while no read
+  has failed. A refusal reason atom, or `nil`, is accepted too.
+  """
+  @spec refusal_name(ReadStream.t() | ReadStream.refusal() | nil) :: String.t()
+  def refusal_name(%ReadStream{} = stream), do: refusal_name(ReadStream.refusal(stream))
+  def refusal_name(nil), do: "none"
+  def refusal_name(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  @doc """
+  Fails the stream with a refusal reason (the reference's `serialize_fail`,
+  IMPLEMENTING.md U14). On a read stream it latches `reason`, and any value
+  outside the closed list — `nil` included — latches `:rejected`, so a
+  refused stream never reports none; a stream that already refused keeps
+  its first reason. On a write or measure stream it returns
+  `{:error, stream}` with the stream unchanged, and never raises (U9).
+  """
+  @spec serialize_fail(stream, term) :: {:error, stream}
+  def serialize_fail(%ReadStream{} = stream, reason),
+    do: {:error, ReadStream.fail(stream, reason)}
+
+  def serialize_fail(%WriteStream{} = stream, _reason), do: {:error, stream}
+  def serialize_fail(%MeasureStream{} = stream, _reason), do: {:error, stream}
 
   @doc "The pad bits an align would cost now: exact on write and read, 7 on measure."
   @spec align_bits(stream) :: 0..7
@@ -712,6 +980,13 @@ defmodule Serialize do
   # bearing: a refusal can only be decided while reading, and a miss crashes
   # here rather than skipping the latch.
   defp refuse(%ReadStream{} = stream, reason), do: {:error, ReadStream.fail(stream, reason)}
+
+  # A caller declaration that does not hold (IMPLEMENTING.md U7, U9, U16):
+  # the write-misuse mechanism, ArgumentError, on write and measure; on read
+  # a refusal as :value_out_of_range before any bits move. A stream that
+  # already refused keeps its first reason.
+  defp misuse(%ReadStream{} = stream, _message), do: refuse(stream, :value_out_of_range)
+  defp misuse(_stream, message), do: raise(ArgumentError, message)
 
   defp writing?(%ReadStream{}), do: false
   defp writing?(_stream), do: true

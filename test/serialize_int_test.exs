@@ -61,7 +61,7 @@ defmodule Serialize.IntTest do
         Serialize.serialize_int(WriteStream.new(), 101, -100, 100)
       end
 
-      assert_raise FunctionClauseError, fn ->
+      assert_raise ArgumentError, fn ->
         Serialize.serialize_int(WriteStream.new(), 0, 100, -100)
       end
     end

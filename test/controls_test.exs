@@ -154,16 +154,33 @@ defmodule Serialize.ControlsTest do
         "          {:ok, read, Kernel.min(trunc((min + offset64) * 1.0), 0x7FFFFFFFFFFFFFFF)} # NEGATIVE CONTROL: the value goes through a double on purpose"}
      ]},
 
-    # A nested object on a failed stream refuses, on entry and on exit. This
-    # port composes nested objects with plain calls, so the rule lives in the
-    # runner's composition rather than in lib/, and the sabotage patches the
-    # runner: both checks go, since either alone refuses an empty object.
-    {"object-terminal", "a nested object on a failed stream refuses",
+    # A nested object on a failed stream refuses before its function runs:
+    # the entry check goes, as in the reference. The exit check still
+    # refuses, so what goes red is the function being called at all.
+    {"object-terminal", "a nested object on a failed stream refuses before its callback runs",
      [
-       {"../test/support/conformance_runner.ex", "    if failed?(stream) do",
-        "    if failed?(stream) and node == nil do" <> @deleted},
-       {"../test/support/conformance_runner.ex", "          if failed?(stream),",
-        "          if failed?(stream) and node == nil," <> @deleted}
+       {"serialize.ex",
+        "  def serialize_object(%ReadStream{failed: true} = stream, fun) when is_function(fun, 1),",
+        "  def serialize_object(%ReadStream{failed: true} = stream, fun) when is_function(fun, 1) and fun == nil," <>
+          @deleted}
+     ]},
+
+    # The object's latch, as 2.0 had it: it poisons the stream and records
+    # no reason, so an object whose function returns failure on its own
+    # leaves a refused stream reporting none.
+    {"object-latch-rejected", "a nested object that refuses on its own latches rejected",
+     [
+       {"serialize.ex", "  defp latch_object(stream), do: ReadStream.fail(stream, :rejected)",
+        "  defp latch_object(stream), do: %{stream | failed: true, refusal: nil} # NEGATIVE CONTROL: the 2.0 latch, recording no reason, on purpose"}
+     ]},
+
+    # serialize_reject refuses under a wire rule's name: the stream still
+    # fails and stays failed, only the reason is wrong.
+    {"reject-reason", "serialize_reject refuses as rejected",
+     [
+       {"serialize.ex",
+        "  def serialize_reject(%ReadStream{} = stream), do: {:error, ReadStream.reject(stream)}",
+        "  def serialize_reject(%ReadStream{} = stream), do: {:error, ReadStream.fail(stream, :value_out_of_range)} # NEGATIVE CONTROL: the wrong reason on purpose"}
      ]},
 
     # the refusal reason: this reader refuses every stream the real one

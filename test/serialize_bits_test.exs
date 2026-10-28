@@ -79,8 +79,8 @@ defmodule Serialize.BitsOpTest do
       Serialize.serialize_bits(WriteStream.new(), 1 <<< 45, 40)
     end
 
-    assert_raise FunctionClauseError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 0) end
-    assert_raise FunctionClauseError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 65) end
+    assert_raise ArgumentError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 0) end
+    assert_raise ArgumentError, fn -> Serialize.serialize_bits(WriteStream.new(), 0, 65) end
     # the misuse is a runtime value: a literal would be refused by the
     # compiler's type check before the library's own check could run
     not_a_boolean = :erlang.binary_to_term(:erlang.term_to_binary(1))

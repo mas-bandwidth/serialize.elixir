@@ -24,6 +24,11 @@ defmodule Serialize.ReadStream do
   Every refusal names its rule (STANDARD.md "Refusal reasons"), and the
   stream latches the FIRST refusal's reason beside the flag: `refusal/1`
   reads it. The later refusals of a failed stream are echoes and keep it.
+
+  The caller refuses a read of its own with `reject/1`, which latches
+  `:rejected` (STANDARD.md "Refusal reasons", standard 2.1): the bytes were
+  well formed, and the caller refused the value they carry. It goes through
+  the same latch as every wire refusal, so the first reason wins.
   """
 
   import Bitwise
@@ -44,6 +49,7 @@ defmodule Serialize.ReadStream do
           | :invalid_utf8
           | :embedded_nul
           | :non_canonical
+          | :rejected
 
   @type t :: %__MODULE__{
           data: binary,
@@ -61,7 +67,8 @@ defmodule Serialize.ReadStream do
     :non_finite_float,
     :invalid_utf8,
     :embedded_nul,
-    :non_canonical
+    :non_canonical,
+    :rejected
   ]
 
   @doc "The closed list of refusal reasons, in STANDARD.md's order."
@@ -80,12 +87,27 @@ defmodule Serialize.ReadStream do
   `Serialize` that decode above these primitives — latch through this. The
   first refusal's reason is kept: a stream that has already failed keeps
   the reason it failed for.
+
+  A reason outside the closed list is the caller refusing without saying
+  why, and latches `:rejected` (STANDARD.md "Refusal reasons"): a refused
+  stream never reports no reason.
   """
-  @spec fail(t, refusal) :: t
-  def fail(%__MODULE__{failed: true} = stream, reason) when reason in @refusals, do: stream
+  @spec fail(t, refusal | term) :: t
+  def fail(%__MODULE__{failed: true} = stream, _reason), do: stream
 
   def fail(%__MODULE__{} = stream, reason) when reason in @refusals,
     do: %{stream | failed: true, refusal: reason}
+
+  def fail(%__MODULE__{} = stream, _reason), do: %{stream | failed: true, refusal: :rejected}
+
+  @doc """
+  The caller's own refusal: latches the stream failed as `:rejected`. The
+  bytes were well formed and the caller refuses the value they carry. On a
+  stream that already failed it changes nothing, and the first reason is
+  kept.
+  """
+  @spec reject(t) :: t
+  def reject(%__MODULE__{} = stream), do: fail(stream, :rejected)
 
   @doc "Whether a read on this stream has failed."
   @spec failed?(t) :: boolean
