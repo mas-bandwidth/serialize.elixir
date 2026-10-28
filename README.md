@@ -34,7 +34,7 @@ Depend on it from git:
 ```elixir
 defp deps do
   [
-    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v2.1.0"}
+    {:serialize, git: "https://github.com/mas-bandwidth/serialize.elixir.git", tag: "v2.1.1"}
   ]
 end
 ```
