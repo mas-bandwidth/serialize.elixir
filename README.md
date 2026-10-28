@@ -63,8 +63,10 @@ values and never raise. A refusal is terminal — the read stream latches
 failed, and every later read on it refuses — and hands back no value at
 all. Every refusal names its rule from the standard's closed list
 (`:past_end`, `:value_out_of_range`, `:nonzero_padding`, `:trailing_data`,
-`:non_finite_float`, `:invalid_utf8`, `:embedded_nul`, `:non_canonical`),
-and `Serialize.refusal/1` reads the first one. [USAGE.md](USAGE.md)
+`:non_finite_float`, `:invalid_utf8`, `:embedded_nul`, `:non_canonical`,
+`:rejected`), and `Serialize.refusal/1` reads the first one. A caller
+refuses a value of its own with `serialize_reject/1`, and nests objects
+with `serialize_object/2`. [USAGE.md](USAGE.md)
 teaches every operation by example.
 
 - **Raw bits**: `serialize_bits/3` (1–64 bits in one call — BEAM

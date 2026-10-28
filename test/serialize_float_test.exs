@@ -154,11 +154,11 @@ defmodule Serialize.FloatTest do
     # the largest finite float32 itself is fine
     {:ok, _, _} = Serialize.serialize_float(WriteStream.new(), Float32.value32(0x7F7FFFFF))
     # the non-finite carrier of format 1.1 is gone
-    assert_raise FunctionClauseError, fn ->
+    assert_raise ArgumentError, fn ->
       Serialize.serialize_float(WriteStream.new(), {:nonfinite, 0x7FC00000})
     end
 
-    assert_raise FunctionClauseError, fn ->
+    assert_raise ArgumentError, fn ->
       Serialize.serialize_double(WriteStream.new(), {:nonfinite, 0x7FF0000000000000})
     end
   end

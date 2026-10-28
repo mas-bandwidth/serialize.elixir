@@ -46,9 +46,23 @@ Serialize.bits_processed(measure) # 9
 On a write or measure stream the value arguments are the message; on a
 read stream they are ignored and the decoded values come back in the
 `{:ok, stream, value}` tuples — which is why one function serves all
-three directions. The reference's `serialize_object` is composition,
-contributes no bytes, and needs no operation here: compose with plain
-function calls.
+three directions. Nest one message in another with
+`Serialize.serialize_object/2`, which calls the nested serialize function
+inline and contributes no bytes. On a read it refuses a stream that already
+refused without calling the function, and when the function returns
+`{:error, stream}` on its own it latches `:rejected`. To refuse a value
+your own validation dislikes, at any level, return
+`Serialize.serialize_reject(stream)`:
+
+```elixir
+def serialize_header(stream, header) do
+  with {:ok, stream, kind} <- Serialize.serialize_bits(stream, header.kind, 4) do
+    if kind in [1, 2, 3], do: {:ok, stream, %{kind: kind}}, else: Serialize.serialize_reject(stream)
+  end
+end
+
+{:ok, stream, header} = Serialize.serialize_object(stream, &serialize_header(&1, header))
+```
 
 `WriteStream.new/0` takes no capacity — the stream grows without bound
 (see the README's "Write stream growth"). Always pipe through
@@ -86,6 +100,7 @@ stream are echoes that keep it:
 | `:invalid_utf8` | a string payload that is not well-formed UTF-8 |
 | `:embedded_nul` | a zero byte among a string's bytes |
 | `:non_canonical` | the `int_relative` absolute tier carrying a difference a bounded tier carries |
+| `:rejected` | the bytes were well formed, and the caller refused the value they carry (`serialize_reject/1`, or a nested object's function returning `{:error, stream}`) |
 
 ```elixir
 {:error, reader} = serialize(ReadStream.new(<<0xFF, 0x00>>), %{x: 0, flag: false})
@@ -136,7 +151,22 @@ this implementation's misuse convention. The contracts are always on:
 raising is idiomatic BEAM error handling for broken code, and pattern
 matching and guards do most of the checking for free, so the library has
 no separate release shape. Misuse raises at the call site; it never
-reaches the wire.
+reaches the wire. A measure holds the caller to exactly the writer's
+contract, so a measure never prices a message that cannot be written.
+
+On the read side nothing raises. A caller declaration that cannot hold —
+a bit count outside `[1, 64]`, ranged bounds outside their width or with
+`min > max`, a negative byte count, a string `buffer_size` below 1, a
+fixed point or compressed float declaration that does not fit — refuses
+as `:value_out_of_range` before any bits move, and a stream that already
+refused keeps its first reason. `Serialize.refusal_name/1` spells the
+reason as the family does (`"none"` for no refusal), and
+`Serialize.serialize_fail/2` fails a stream with a reason of your own
+choosing (anything outside the closed list latches `:rejected`).
+
+`WriteStream.flush/1` is required before `WriteStream.data/1`: the
+buffer is unspecified until then. Streams are immutable values, so there
+is no re-initialization: start a fresh one with `new`.
 
 ```elixir
 Serialize.serialize_int(WriteStream.new(), 999, 0, 100)
@@ -271,12 +301,24 @@ family's discriminating vectors pin the decoded bit patterns.
 # decoded value is byte-identical (the round trip is idempotent).
 ```
 
-Finite values outside `[min, max]` clamp on write; a non-finite value or
-declaration raises `ArgumentError` (writer contract), and so does a
-declaration whose top integer decodes past the float32 range
+Finite values outside `[min, max]` clamp on write (an integer too large
+for a double clamps like an infinity); a non-number value or a
+non-finite declaration raises `ArgumentError` (writer contract), and so
+does a declaration whose top integer decodes past the float32 range
 (`min + delta` rounding to an infinity). Reads refuse integers smuggled
 above the quantization ceiling as `:value_out_of_range`, and a decode
-that is not finite as `:non_finite_float`, whatever the declaration.
+that is not finite as `:non_finite_float`; a declaration that is not
+finite in float32 or not `min < max`, `res > 0` refuses on read as
+`:value_out_of_range`.
+
+The derivation is paid once with `compressed_float_params/3`, and its
+constants go to `serialize_compressed_float_precomputed/6`, byte for byte
+the same wire:
+
+```elixir
+{:ok, {miv, bits, delta}} = Serialize.compressed_float_params(0.0, 10.0, 0.01)
+{:ok, stream, _} = Serialize.serialize_compressed_float_precomputed(stream, 5.0, miv, bits, delta, 0.0)
+```
 
 ## Raw bytes
 
@@ -314,10 +356,10 @@ Reads validate the payload in every case: an interior NUL refuses as
 `:embedded_nul` — the classic two-lengths smuggling primitive, checked
 over the whole payload first — and malformed UTF-8 as `:invalid_utf8`.
 An accepted payload comes back exactly as read: no normalization, no
-stripped byte order mark, no replacement character, every plane. On write, the payload is well-formed
-UTF-8 with no interior NUL by writer contract (unchecked, per the
-trusted-writes doctrine); a value that is not a binary, or does not fit
-`buffer_size`, raises `ArgumentError`.
+stripped byte order mark, no replacement character, every plane. On write
+and measure, a value that is not a binary, that does not fit
+`buffer_size`, that holds a zero byte or that is not well-formed UTF-8
+raises `ArgumentError`: a writer never sends bytes a reader refuses.
 
 ## The relative integer
 
@@ -343,8 +385,9 @@ carrying a difference of 69914 or less is refused as `:non_canonical`.
 ```
 
 `previous` is caller state, not wire: both sides already know it, and
-one outside the domain is caller error the guard rejects — a 64-bit or
-unsigned `2^31` exactly as a negative one. Writing `current <= previous`,
+one outside the domain is caller error — a 64-bit or unsigned `2^31`
+exactly as a negative one — raising `ArgumentError` on write and measure
+and refusing as `:value_out_of_range` on read. Writing `current <= previous`,
 or a `current` past the top of the domain, raises `ArgumentError`.
 
 ## Fixed point
@@ -376,7 +419,8 @@ upward — byte identical to `serialize_int64` of the raw value wherever
 storage fits 64 bits — and the round trip is **exact**: no quantization,
 unlike the compressed float. A degenerate `min == max` range costs zero
 bits on every storage width. Reads refuse raw values smuggled into the
-bit headroom; an invalid declaration raises `ArgumentError`.
+bit headroom; an invalid declaration raises `ArgumentError` on write and
+measure and refuses as `:value_out_of_range` on read.
 
 ## Measuring
 

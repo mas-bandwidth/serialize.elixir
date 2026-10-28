@@ -230,7 +230,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-latest
     env:
-      SERIALIZE_TAG: v2.0.1
+      SERIALIZE_TAG: v2.1.0
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -246,13 +246,16 @@ jobs:
       # corpus and the runner that can drive it are one artifact, and a reference
       # reader older than the corpus cannot drive vectors whose operations it has
       # no code for. STANDARD.md requires that to be red rather than skipped, so
-      # it is checked here rather than assumed.
+      # it is checked here rather than assumed. IMPLEMENTING.md is not held to
+      # the pin: it is implementation practice, not wire, and the reference
+      # amends it between releases (the U15 ruling landed after v2.1.0), so it
+      # follows upstream main through the corpus-sync job above instead. Held
+      # to both, the two jobs could not be green at once.
       - name: The vendored corpus is the pinned release's corpus
         run: |
           diff -ru /tmp/cpp-serialize/conformance conformance
           diff -ru /tmp/cpp-serialize/conformance-controls conformance-controls
           diff -u /tmp/cpp-serialize/STANDARD.md STANDARD.md
-          diff -u /tmp/cpp-serialize/IMPLEMENTING.md IMPLEMENTING.md
 
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
