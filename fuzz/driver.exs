@@ -74,6 +74,11 @@ defmodule Serialize.FuzzDriver do
         probe_broken =
           case {probe_a, probe_b} do
             {{:error, r_a2}, {:error, r_b2}} ->
+              r_b2 =
+                if System.get_env("SERIALIZE_FUZZ_SABOTAGE") == "hostile-read",
+                  do: %{r_b2 | bits: refused_bits + 1},
+                  else: r_b2
+
               Serialize.refusal(r_a2) != first_refusal or
                 Serialize.refusal(r_b2) != first_refusal or
                 Serialize.bits_processed(r_a2) != refused_bits or
@@ -112,6 +117,11 @@ defmodule Serialize.FuzzDriver do
 
       case {op(kind, r_a, args, false), op(kind, r_b, args, true)} do
         {{:error, r_a2}, {:error, r_b2}} ->
+          r_b2 =
+            if System.get_env("SERIALIZE_FUZZ_SABOTAGE") == "hostile-read",
+              do: %{r_b2 | bits: refused_bits + 1},
+              else: r_b2
+
           broken =
             term_broken or
               Serialize.refusal(r_a2) != first_refusal or

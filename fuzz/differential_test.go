@@ -819,6 +819,9 @@ func runDriver(t *testing.T, batchFile string) []string {
 		elixir = "elixir"
 	}
 	cmd := exec.Command(elixir, "-pa", ebinDir(t), filepath.Join(repoRoot(t), "fuzz", "driver.exs"), batchFile)
+	if *sabotageHostileRead {
+		cmd.Env = append(os.Environ(), "SERIALIZE_FUZZ_SABOTAGE=hostile-read")
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -1010,9 +1013,6 @@ func (h *harness) runRound(g *gen, n int, seen map[string]bool) int {
 		if mutated[i] != nil {
 			goMut := readGo(p, mutated[i])
 			exMut := exMutRead[i]
-			if *sabotageHostileRead && exMut.reason != "ok" {
-				exMut.reason = "terminality:" + exMut.reason
-			}
 			if goMut.n != exMut.n || goMut.reason != exMut.reason || !equalStrings(goMut.tokens, exMut.tokens) {
 				h.fail(i, p, [][]byte{mutated[i]},
 					"mutation disagreement on %x (from %x)\ngo:     stopped at %d (%s) %q\nelixir: stopped at %d (%s) %q",
