@@ -52,11 +52,12 @@ import (
 )
 
 var (
-	widenIntRange = flag.Bool("widen-int", false, "negative control: the Go side widens int64 ranges by one bit, so the test must go red")
-	seedFlag      = flag.Uint64("seed", 0, "generator seed; 0 means the fixed default seed")
-	durationFlag  = flag.Duration("duration", 0, "keep running rounds until this much time has passed; 0 runs one round")
-	programsFlag  = flag.Int("programs", 2000, "programs per round")
-	failuresFlag  = flag.String("failures", "", "directory a failing program is written to, replayable by driver.exs")
+	widenIntRange       = flag.Bool("widen-int", false, "negative control: the Go side widens int64 ranges by one bit, so the test must go red")
+	sabotageHostileRead = flag.Bool("sabotage-hostile-read", false, "negative control: refused mutant reads report terminality:<reason>, so the hostile-read differential must go red")
+	seedFlag            = flag.Uint64("seed", 0, "generator seed; 0 means the fixed default seed")
+	durationFlag        = flag.Duration("duration", 0, "keep running rounds until this much time has passed; 0 runs one round")
+	programsFlag        = flag.Int("programs", 2000, "programs per round")
+	failuresFlag        = flag.String("failures", "", "directory a failing program is written to, replayable by driver.exs")
 )
 
 const (
@@ -818,6 +819,9 @@ func runDriver(t *testing.T, batchFile string) []string {
 		elixir = "elixir"
 	}
 	cmd := exec.Command(elixir, "-pa", ebinDir(t), filepath.Join(repoRoot(t), "fuzz", "driver.exs"), batchFile)
+	if *sabotageHostileRead {
+		cmd.Env = append(os.Environ(), "SERIALIZE_FUZZ_SABOTAGE=hostile-read")
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

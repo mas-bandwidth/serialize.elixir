@@ -118,6 +118,17 @@ jobs:
           head -n 20 /tmp/fuzz-control.txt
           grep -q 'bytes differ' /tmp/fuzz-control.txt
           echo "negative control: the differential went red on widened int ranges"
+      - name: Negative control - hostile-read terminality sabotage must go red
+        working-directory: fuzz
+        run: |
+          if go test -count=1 -timeout 10m -run TestDifferentialAgainstSerializeGo -v -sabotage-hostile-read . > /tmp/fuzz-hostile-control.txt 2>&1; then
+            cat /tmp/fuzz-hostile-control.txt
+            echo "::error::the differential passed with hostile-read terminality sabotage"
+            exit 1
+          fi
+          head -n 20 /tmp/fuzz-hostile-control.txt
+          grep -q 'mutation disagreement on' /tmp/fuzz-hostile-control.txt
+          echo "negative control: the differential went red on hostile-read terminality sabotage"
       - name: Upload failing inputs
         if: failure()
         uses: actions/upload-artifact@v4
