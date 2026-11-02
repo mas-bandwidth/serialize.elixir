@@ -52,11 +52,12 @@ import (
 )
 
 var (
-	widenIntRange = flag.Bool("widen-int", false, "negative control: the Go side widens int64 ranges by one bit, so the test must go red")
-	seedFlag      = flag.Uint64("seed", 0, "generator seed; 0 means the fixed default seed")
-	durationFlag  = flag.Duration("duration", 0, "keep running rounds until this much time has passed; 0 runs one round")
-	programsFlag  = flag.Int("programs", 2000, "programs per round")
-	failuresFlag  = flag.String("failures", "", "directory a failing program is written to, replayable by driver.exs")
+	widenIntRange       = flag.Bool("widen-int", false, "negative control: the Go side widens int64 ranges by one bit, so the test must go red")
+	sabotageHostileRead = flag.Bool("sabotage-hostile-read", false, "negative control: refused mutant reads report terminality:<reason>, so the hostile-read differential must go red")
+	seedFlag            = flag.Uint64("seed", 0, "generator seed; 0 means the fixed default seed")
+	durationFlag        = flag.Duration("duration", 0, "keep running rounds until this much time has passed; 0 runs one round")
+	programsFlag        = flag.Int("programs", 2000, "programs per round")
+	failuresFlag        = flag.String("failures", "", "directory a failing program is written to, replayable by driver.exs")
 )
 
 const (
@@ -1009,6 +1010,9 @@ func (h *harness) runRound(g *gen, n int, seen map[string]bool) int {
 		if mutated[i] != nil {
 			goMut := readGo(p, mutated[i])
 			exMut := exMutRead[i]
+			if *sabotageHostileRead && exMut.reason != "ok" {
+				exMut.reason = "terminality:" + exMut.reason
+			}
 			if goMut.n != exMut.n || goMut.reason != exMut.reason || !equalStrings(goMut.tokens, exMut.tokens) {
 				h.fail(i, p, [][]byte{mutated[i]},
 					"mutation disagreement on %x (from %x)\ngo:     stopped at %d (%s) %q\nelixir: stopped at %d (%s) %q",
