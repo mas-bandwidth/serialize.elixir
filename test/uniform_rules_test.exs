@@ -363,6 +363,14 @@ defmodule Serialize.UniformRulesTest do
     end
   end
 
+  test "flush and data keep the processed bytes on a write stream" do
+    {:ok, writer, _} = Serialize.serialize_uint8(WriteStream.new(), 0xAB)
+    writer = WriteStream.flush(writer)
+    {:ok, writer, _} = Serialize.serialize_uint8(writer, 0xCD)
+    assert WriteStream.data(WriteStream.flush(writer)) == <<0xAB, 0xCD>>
+    assert WriteStream.data(writer) == <<0xAB, 0xCD>>
+  end
+
   test "U8: a value that does not fit its width raises on write, the 64-bit path included" do
     for stream <- writers() do
       assert_raise ArgumentError, fn ->

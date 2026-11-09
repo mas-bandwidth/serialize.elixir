@@ -131,6 +131,40 @@ defmodule Serialize.BitpackerTest do
     assert (byte &&& 0b11111000) == 0
   end
 
+  test "writing continues after flush at the bit cursor" do
+    writer =
+      BitWriter.new()
+      |> BitWriter.write_bits(0xAB, 8)
+      |> BitWriter.flush()
+      |> BitWriter.write_bits(0xCD, 8)
+      |> BitWriter.flush()
+
+    assert BitWriter.bits_written(writer) == 16
+    assert BitWriter.data(writer) == <<0xAB, 0xCD>>
+  end
+
+  test "write_bytes after flush and align writes the payload" do
+    writer =
+      BitWriter.new()
+      |> BitWriter.write_bits(0b101, 3)
+      |> BitWriter.flush()
+      |> BitWriter.write_align()
+      |> BitWriter.write_bytes(<<1>>)
+
+    assert BitWriter.bits_written(writer) == 16
+    assert BitWriter.data(writer) == <<0x05, 0x01>>
+  end
+
+  test "data before flush returns every written byte" do
+    writer =
+      BitWriter.new()
+      |> BitWriter.write_bits(0xFFFFFFFF, 32)
+      |> BitWriter.write_bits(0xAB, 8)
+
+    assert BitWriter.bytes_written(writer) == 5
+    assert BitWriter.data(writer) == <<0xFF, 0xFF, 0xFF, 0xFF, 0xAB>>
+  end
+
   test "bytes_written rounds the bit count up" do
     writer = BitWriter.new() |> BitWriter.write_bits(1, 1)
     assert BitWriter.bytes_written(writer) == 1
