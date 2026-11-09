@@ -212,7 +212,13 @@ defmodule Serialize.WriteStream do
     }
   end
 
-  @doc "The bytes written. Call `flush/1` first."
+  @doc """
+  The bytes written. Call `flush/1` first.
+
+  When the underlying buffer exceeds 64 bytes, the returned slice is a
+  sub-binary referencing the stream's append buffer; pass it through
+  `:binary.copy/1` if retaining it long-term.
+  """
   @spec data(t) :: binary
   def data(%__MODULE__{} = stream) do
     binary_part(stream.data, 0, min(byte_size(stream.data), bytes_processed(stream)))
