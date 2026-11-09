@@ -80,6 +80,34 @@ defmodule Serialize.StreamsTest do
     assert data_doc =~ ":binary.copy/1"
   end
 
+  test "writing continues after flush at the bit cursor" do
+    {:ok, writer, _} = Serialize.serialize_uint8(WriteStream.new(), 0xAB)
+    writer = WriteStream.flush(writer)
+    {:ok, writer, _} = Serialize.serialize_uint8(writer, 0xCD)
+    writer = WriteStream.flush(writer)
+    assert Serialize.bits_processed(writer) == 16
+    assert WriteStream.data(writer) == <<0xAB, 0xCD>>
+  end
+
+  test "serialize_bytes after flush aligns and writes the payload" do
+    {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), 0b101, 3)
+    writer = WriteStream.flush(writer)
+    assert {:ok, writer, <<1>>} = Serialize.serialize_bytes(writer, <<1>>, 1)
+    assert Serialize.bits_processed(writer) == 16
+    assert WriteStream.data(writer) == <<0x05, 0x01>>
+  end
+
+  test "data before flush returns every processed byte" do
+    writer =
+      Enum.reduce([1, 2, 3, 4, 5], WriteStream.new(), fn byte, writer ->
+        {:ok, writer, _} = Serialize.serialize_uint8(writer, byte)
+        writer
+      end)
+
+    assert Serialize.bytes_processed(writer) == 5
+    assert WriteStream.data(writer) == <<1, 2, 3, 4, 5>>
+  end
+
   test "the writer's flushed words zero-fill past the bit index" do
     writer = WriteStream.new()
     {:ok, writer, _} = Serialize.serialize_bits(writer, 1, 1)

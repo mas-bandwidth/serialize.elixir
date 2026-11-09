@@ -190,7 +190,7 @@ defmodule Serialize.WriteStream do
 
   # Internal, no promise (IMPLEMENTING.md U15).
   # Writes the end of the object: nothing. The unused bits of the final byte
-  # are zero because the flush writes them so.
+  # are zero because `data/1` presents the partial word so.
   @doc false
   @spec serialize_end(t) :: {:ok, t}
   def serialize_end(%__MODULE__{} = stream), do: {:ok, stream}
@@ -199,21 +199,16 @@ defmodule Serialize.WriteStream do
   @spec align_bits(t) :: 0..7
   def align_bits(%__MODULE__{} = stream), do: rem(8 - rem(stream.bits_written, 8), 8)
 
-  @doc "Flushes the final partial word. Call before `data/1`."
+  @doc """
+  Returns the stream unchanged, kept for parity with the reference.
+  `data/1` includes the partial word, so writing may continue after
+  this call at the current bit cursor.
+  """
   @spec flush(t) :: t
-  def flush(%__MODULE__{scratch_bits: 0} = stream), do: stream
-
-  def flush(%__MODULE__{} = stream) do
-    %{
-      stream
-      | data: <<stream.data::binary, stream.scratch::little-32>>,
-        scratch: 0,
-        scratch_bits: 0
-    }
-  end
+  def flush(%__MODULE__{} = stream), do: stream
 
   @doc """
-  The bytes written. Call `flush/1` first.
+  The bytes written so far, trimmed to `bytes_processed/1`.
 
   When the underlying buffer exceeds 64 bytes, the returned slice is a
   sub-binary referencing the stream's append buffer; pass it through
@@ -221,7 +216,17 @@ defmodule Serialize.WriteStream do
   """
   @spec data(t) :: binary
   def data(%__MODULE__{} = stream) do
-    binary_part(stream.data, 0, min(byte_size(stream.data), bytes_processed(stream)))
+    partial_bytes = div(stream.scratch_bits + 7, 8)
+
+    partial =
+      if partial_bytes == 0 do
+        <<>>
+      else
+        binary_part(<<stream.scratch::little-32>>, 0, partial_bytes)
+      end
+
+    full = <<stream.data::binary, partial::binary>>
+    binary_part(full, 0, min(byte_size(full), bytes_processed(stream)))
   end
 
   @doc "The number of bits written so far."

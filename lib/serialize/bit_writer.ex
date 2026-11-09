@@ -14,8 +14,8 @@ defmodule Serialize.BitWriter do
   The output binary is grown by appending, which the runtime optimizes into
   an amortized in-place extension for this single-writer pattern; there is
   no fixed buffer and no capacity, so writes never overflow. `data/1`
-  returns the meaningful bytes — call `flush/1` first, exactly as the
-  reference requires.
+  returns the meaningful bytes, including the partial word; `flush/1`
+  is kept for parity with the reference and returns the writer unchanged.
 
   The reference's public `BitWriter` (IMPLEMENTING.md U15). `pack_bytes/4`
   is internal, shared with `Serialize.WriteStream`: `@doc false`, no promise.
@@ -132,28 +132,30 @@ defmodule Serialize.BitWriter do
   end
 
   @doc """
-  Flushes any partially filled scratch word to the output. The stream then
-  occupies a whole number of words, with zeros beyond the bit index.
+  Returns the writer unchanged, kept for parity with the reference.
+  `data/1` includes the partial word, so writing may continue after
+  this call at the current bit cursor.
   """
   @spec flush(t) :: t
-  def flush(%__MODULE__{scratch_bits: 0} = writer), do: writer
-
-  def flush(%__MODULE__{} = writer) do
-    %{
-      writer
-      | data: <<writer.data::binary, writer.scratch::little-32>>,
-        scratch: 0,
-        scratch_bits: 0
-    }
-  end
+  def flush(%__MODULE__{} = writer), do: writer
 
   @doc """
-  The meaningful bytes written: the bit count rounded up to a byte.
-  Call `flush/1` first.
+  The meaningful bytes written: the bit count rounded up to a byte,
+  including any partial word not yet emitted to the output.
   """
   @spec data(t) :: binary
   def data(%__MODULE__{} = writer) do
-    binary_part(writer.data, 0, min(byte_size(writer.data), bytes_written(writer)))
+    partial_bytes = div(writer.scratch_bits + 7, 8)
+
+    partial =
+      if partial_bytes == 0 do
+        <<>>
+      else
+        binary_part(<<writer.scratch::little-32>>, 0, partial_bytes)
+      end
+
+    full = <<writer.data::binary, partial::binary>>
+    binary_part(full, 0, min(byte_size(full), bytes_written(writer)))
   end
 
   @doc "The number of zero pad bits an align would write now, in `[0, 7]`."
