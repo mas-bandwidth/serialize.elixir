@@ -52,7 +52,9 @@ defmodule Serialize.StreamsTest do
     copied = :binary.copy(bytes)
     assert copied == bytes
     assert :binary.referenced_byte_size(copied) == 100
+  end
 
+  test "the docs note the copy that releases a retained sub-binary" do
     {:docs_v1, _, :elixir, _, _, _, ser_docs} = Code.fetch_docs(Serialize)
 
     bytes_doc =
