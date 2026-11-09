@@ -80,6 +80,10 @@ defmodule Serialize.StreamsTest do
     assert data_doc =~ ":binary.copy/1"
   end
 
+  test "refusal_name returns unknown for a reason outside the closed list" do
+    assert Serialize.refusal_name(:bogus) == "unknown"
+  end
+
   test "writing continues after flush at the bit cursor" do
     {:ok, writer, _} = Serialize.serialize_uint8(WriteStream.new(), 0xAB)
     writer = WriteStream.flush(writer)

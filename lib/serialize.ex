@@ -998,12 +998,29 @@ defmodule Serialize do
   The family spelling of a read stream's refusal (IMPLEMENTING.md U14):
   `"past_end"`, `"value_out_of_range"` and the rest of
   `Serialize.ReadStream.refusals/0` as strings, and `"none"` while no read
-  has failed. A refusal reason atom, or `nil`, is accepted too.
+  has failed. A refusal reason atom, or `nil`, is accepted too, and any
+  other value spells `"unknown"`.
   """
-  @spec refusal_name(ReadStream.t() | ReadStream.refusal() | nil) :: String.t()
+  @spec refusal_name(ReadStream.t() | term) :: String.t()
   def refusal_name(%ReadStream{} = stream), do: refusal_name(ReadStream.refusal(stream))
   def refusal_name(nil), do: "none"
-  def refusal_name(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  def refusal_name(reason)
+      when reason in [
+             :past_end,
+             :value_out_of_range,
+             :nonzero_padding,
+             :trailing_data,
+             :non_finite_float,
+             :invalid_utf8,
+             :embedded_nul,
+             :non_canonical,
+             :rejected
+           ],
+      do: Atom.to_string(reason)
+
+  def refusal_name(reason) when is_atom(reason), do: "unknown"
+  def refusal_name(_other), do: "unknown"
 
   @doc """
   Fails the stream with a refusal reason (the reference's `serialize_fail`,
