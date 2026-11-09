@@ -95,9 +95,10 @@ defmodule Serialize.BitReader do
   end
 
   @doc """
-  Reads `count` raw bytes at a byte-aligned position, returning a
-  sub-binary of the data — no copy. The caller has aligned and checked the
-  bounds.
+  Reads `count` raw bytes at a byte-aligned position via `binary_part/3`
+  (a sub-binary of the data when over 64 bytes; use `:binary.copy/1` if
+  retaining beyond the packet lifetime). The caller has aligned and checked
+  the bounds.
   """
   @spec read_bytes(t, non_neg_integer) :: {binary, t}
   def read_bytes(%__MODULE__{} = reader, count)

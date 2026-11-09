@@ -41,13 +41,43 @@ defmodule Serialize.StreamsTest do
     assert Serialize.bits_processed(reader) == 4
   end
 
-  test "the reader shares the input binary: read bytes are sub-binaries, not copies" do
-    data = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9>>
+  test "the reader shares the input binary: read bytes over 64B are sub-binaries until copied" do
+    data = :binary.copy(<<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11>>, 100)
+    assert byte_size(data) == 1_200
     reader = ReadStream.new(data)
-    {:ok, _reader, bytes} = Serialize.serialize_bytes(reader, nil, 10)
-    assert bytes == data
-    # a sub-binary of the input, not a reallocation
-    assert :binary.referenced_byte_size(bytes) == byte_size(data)
+    {:ok, _reader, bytes} = Serialize.serialize_bytes(reader, nil, 100)
+    assert byte_size(bytes) == 100
+    assert bytes == binary_part(data, 0, 100)
+    assert :binary.referenced_byte_size(bytes) == 1_200
+    copied = :binary.copy(bytes)
+    assert copied == bytes
+    assert :binary.referenced_byte_size(copied) == 100
+
+    {:docs_v1, _, :elixir, _, _, _, ser_docs} = Code.fetch_docs(Serialize)
+
+    bytes_doc =
+      Enum.find_value(ser_docs, fn
+        {{:function, :serialize_bytes, 3}, _, _, %{"en" => doc}, _} -> doc
+        _ -> nil
+      end)
+
+    string_doc =
+      Enum.find_value(ser_docs, fn
+        {{:function, :serialize_string, 3}, _, _, %{"en" => doc}, _} -> doc
+        _ -> nil
+      end)
+
+    {:docs_v1, _, :elixir, _, _, _, ws_docs} = Code.fetch_docs(WriteStream)
+
+    data_doc =
+      Enum.find_value(ws_docs, fn
+        {{:function, :data, 1}, _, _, %{"en" => doc}, _} -> doc
+        _ -> nil
+      end)
+
+    assert bytes_doc =~ ":binary.copy/1"
+    assert string_doc =~ ":binary.copy/1"
+    assert data_doc =~ ":binary.copy/1"
   end
 
   test "the writer's flushed words zero-fill past the bit index" do

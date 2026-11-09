@@ -749,7 +749,10 @@ defmodule Serialize do
   Serializes `count` raw bytes, aligning first — the alignment is part of
   the format, performed even when `count` is zero. `count` is not written;
   both sides must agree on it. On read, `data` is ignored and the bytes
-  come back as a sub-binary of the stream's data.
+  come back via `binary_part/3`: on the BEAM, slices over 64 bytes are
+  sub-binaries referencing the stream's underlying binary, so callers
+  retaining a value beyond the packet lifetime should pass it through
+  `:binary.copy/1`.
   """
   @spec serialize_bytes(stream, binary | nil, non_neg_integer) :: result(binary)
   def serialize_bytes(%WriteStream{} = stream, data, count)
@@ -784,7 +787,9 @@ defmodule Serialize do
   a length past the buffer as `:value_out_of_range`, a zero byte as
   `:embedded_nul`, then malformed UTF-8 as `:invalid_utf8`. An accepted
   payload comes back exactly as read: no normalization, no replacement and
-  no stripped byte order mark.
+  no stripped byte order mark. On read, strings over 64 bytes are
+  sub-binaries referencing the stream's underlying binary; pass retained
+  values through `:binary.copy/1` to release the packet buffer.
   """
   @spec serialize_string(stream, String.t() | nil, pos_integer) :: result(String.t())
   def serialize_string(stream, value, buffer_size)

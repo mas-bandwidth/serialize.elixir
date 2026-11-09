@@ -337,8 +337,11 @@ the same wire:
 `serialize_bytes/3` aligns to the byte boundary (the alignment is part
 of the format, padding verified on read) and then bulk-copies `count`
 bytes. The count is never transmitted: both sides agree on it. On read,
-the data argument is ignored and the bytes come back as a sub-binary of
-the stream's data — no copy.
+the data argument is ignored and the bytes come back via `binary_part/3`:
+on the BEAM, slices over 64 bytes are sub-binaries referencing the
+stream's data (while smaller slices are copied), so callers retaining
+read bytes or strings beyond the packet lifetime should pass them through
+`:binary.copy/1`.
 
 ```elixir
 {:ok, stream, _} = Serialize.serialize_bytes(stream, <<0xDE, 0xAD, 0xBE, 0xEF>>, 4)
