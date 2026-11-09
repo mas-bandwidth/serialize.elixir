@@ -31,7 +31,10 @@ defmodule Serialize do
   element, so nothing can be mistaken for a decoded value. It is also
   terminal — nothing after the failing operation has a defined position —
   and the stream enforces that: the refusal latches the read stream
-  failed, and every later read on it refuses without consuming bits. See
+  returned in `{:error, stream}` failed, and every later read on that
+  returned stream refuses without consuming bits (because streams are
+  immutable structs, callers must continue from the returned `stream`
+  binding rather than reusing an earlier binding). See
   `Serialize.ReadStream`.
 
   Every refusal names its rule from STANDARD.md's closed list — `:past_end`,
