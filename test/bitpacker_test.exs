@@ -16,7 +16,7 @@ defmodule Serialize.BitpackerTest do
     assert BitWriter.data(writer) == <<0b10010101>>
   end
 
-  test "a value crossing the 64-bit word boundary splits low bits first" do
+  test "a value crossing the 32-bit word boundary splits low bits first" do
     # 60 zero bits, then 8 bits of 0xAB: the low nibble completes word 0,
     # the high nibble begins word 1
     writer =
