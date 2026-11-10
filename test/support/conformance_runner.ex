@@ -15,14 +15,11 @@ defmodule Serialize.ConformanceRunner do
 
   alias Serialize.{ConformanceVectors, Float32, MeasureStream, ReadStream, WriteStream}
 
-  # The buffer contract, STANDARD.md "The conformance corpus": every stream
-  # is presented with the slack its port's contract requires, filled with a non-zero pattern so a decode that depends on
-  # memory past the end cannot pass by reading zeros. This port's streams
-  # are BEAM binaries whose length is the stream's length, so the slack it
-  # requires of a caller is zero bytes -- and to make the requirement
-  # measurable rather than assumed, each stream below is a sub-binary of a
-  # larger buffer whose trailing bytes are 0xA5, including the empty stream
-  # of a zero-bit read.
+  # The buffer contract, STANDARD.md "The conformance corpus": this port's
+  # streams are BEAM binaries. The VM bounds a binary from `:binary.part`
+  # at its byte size. Each stream below is a sub-binary input cut from a
+  # longer buffer whose trailing bytes are 0xA5, including the empty stream
+  # of a zero-bit read. These runs exercise sub-binary inputs.
   @slack 8
   @slack_fill 0xA5
 
