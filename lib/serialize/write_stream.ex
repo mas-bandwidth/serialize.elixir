@@ -48,6 +48,7 @@ defmodule Serialize.WriteStream do
   # every intermediate stays a small integer — producing the one allocation
   # the operation costs.
   defp write_bits_flat(stream, value, bits) do
+    BitWriter.check_not_flushed(stream.scratch_bits, stream.bits_written)
     scratch_bits = stream.scratch_bits + bits
 
     if scratch_bits >= 32 do
@@ -164,6 +165,7 @@ defmodule Serialize.WriteStream do
     end
 
     {:ok, stream} = serialize_align(stream)
+    BitWriter.check_not_flushed(stream.scratch_bits, stream.bits_written)
 
     {out, scratch, scratch_bits} =
       BitWriter.pack_bytes(stream.data, stream.scratch, stream.scratch_bits, data)
@@ -192,7 +194,7 @@ defmodule Serialize.WriteStream do
 
   # Internal, no promise (IMPLEMENTING.md U15).
   # Writes the end of the object: nothing. The unused bits of the final byte
-  # are zero because `data/1` presents the partial word so.
+  # are zero because the flush writes them so.
   @doc false
   @spec serialize_end(t) :: {:ok, t}
   def serialize_end(%__MODULE__{} = stream), do: {:ok, stream}
@@ -202,15 +204,24 @@ defmodule Serialize.WriteStream do
   def align_bits(%__MODULE__{} = stream), do: rem(8 - rem(stream.bits_written, 8), 8)
 
   @doc """
-  Returns the stream unchanged, kept for parity with the reference.
-  `data/1` includes the partial word, so writing may continue after
-  this call at the current bit cursor.
+  Flushes the final partial word. Required before `data/1`, and it ends
+  the write: any write after a flush that stored a partial word raises
+  `ArgumentError` (IMPLEMENTING.md U11).
   """
   @spec flush(t) :: t
-  def flush(%__MODULE__{} = stream), do: stream
+  def flush(%__MODULE__{scratch_bits: 0} = stream), do: stream
+
+  def flush(%__MODULE__{} = stream) do
+    %{
+      stream
+      | data: <<stream.data::binary, stream.scratch::little-32>>,
+        scratch: 0,
+        scratch_bits: 0
+    }
+  end
 
   @doc """
-  The bytes written so far, trimmed to `bytes_processed/1`.
+  The bytes written. Call `flush/1` first (IMPLEMENTING.md U11).
 
   When the underlying buffer exceeds 64 bytes, the returned slice is a
   sub-binary referencing the stream's append buffer; pass it through

@@ -14,8 +14,9 @@ defmodule Serialize.BitWriter do
   The output binary is grown by appending, which the runtime optimizes into
   an amortized in-place extension for this single-writer pattern; there is
   no fixed buffer and no capacity, so writes never overflow. `data/1`
-  returns the meaningful bytes, including the partial word; `flush/1`
-  is kept for parity with the reference and returns the writer unchanged.
+  returns the meaningful bytes — call `flush/1` first, exactly as the
+  reference requires (IMPLEMENTING.md U11). Flush ends the write: a write
+  after a flush that stored a partial word raises `ArgumentError`.
 
   The reference's public `BitWriter` (IMPLEMENTING.md U15). `pack_bytes/4`
   is internal, shared with `Serialize.WriteStream`: `@doc false`, no promise.
@@ -40,11 +41,13 @@ defmodule Serialize.BitWriter do
   Writes `value` in `bits` bits, where `bits` is in `[1, 32]`.
 
   Raises `ArgumentError` when `value` is negative or does not fit in
-  `bits` bits.
+  `bits` bits, or after a flush that stored a partial word.
   """
   @spec write_bits(t, non_neg_integer, 1..32) :: t
   def write_bits(%__MODULE__{} = writer, value, bits)
       when is_integer(value) and is_integer(bits) and bits >= 1 and bits <= 32 do
+    check_not_flushed(writer.scratch_bits, writer.bits_written)
+
     if value < 0 or value > (1 <<< bits) - 1 do
       raise ArgumentError, "value #{value} does not fit in #{bits} bits"
     end
@@ -89,11 +92,13 @@ defmodule Serialize.BitWriter do
 
   @doc """
   Writes raw bytes. The stream must be byte aligned — the callers align
-  first, exactly as the reference's `SerializeBytes` does.
+  first, exactly as the reference's `SerializeBytes` does. Raises
+  `ArgumentError` after a flush that stored a partial word.
   """
   @spec write_bytes(t, binary) :: t
   def write_bytes(%__MODULE__{} = writer, bytes) when is_binary(bytes) do
     0 = rem(writer.bits_written, 8)
+    check_not_flushed(writer.scratch_bits, writer.bits_written)
 
     {data, scratch, scratch_bits} =
       pack_bytes(writer.data, writer.scratch, writer.scratch_bits, bytes)
@@ -140,17 +145,42 @@ defmodule Serialize.BitWriter do
     end
   end
 
-  @doc """
-  Returns the writer unchanged, kept for parity with the reference.
-  `data/1` includes the partial word, so writing may continue after
-  this call at the current bit cursor.
-  """
-  @spec flush(t) :: t
-  def flush(%__MODULE__{} = writer), do: writer
+  # Internal, no promise (IMPLEMENTING.md U15).
+  # U11: once a flush has stored a partial word the scratch no longer tracks
+  # the bit cursor, and a later write's bits would land past the bytes the
+  # writer reports. The reference's check, on the 32-bit word: shared with
+  # `Serialize.WriteStream`.
+  @doc false
+  @spec check_not_flushed(0..31, non_neg_integer) :: :ok
+  def check_not_flushed(scratch_bits, bits_written) do
+    if scratch_bits != (bits_written &&& 31) do
+      raise ArgumentError, "write after flush: flush ends the write (IMPLEMENTING.md U11)"
+    end
+
+    :ok
+  end
 
   @doc """
-  The meaningful bytes written: the bit count rounded up to a byte,
-  including any partial word not yet emitted to the output.
+  Flushes any partially filled scratch word to the output. The stream then
+  occupies a whole number of words, with zeros beyond the bit index.
+  Required before `data/1`, and it ends the write: any write after a flush
+  that stored a partial word raises `ArgumentError` (IMPLEMENTING.md U11).
+  """
+  @spec flush(t) :: t
+  def flush(%__MODULE__{scratch_bits: 0} = writer), do: writer
+
+  def flush(%__MODULE__{} = writer) do
+    %{
+      writer
+      | data: <<writer.data::binary, writer.scratch::little-32>>,
+        scratch: 0,
+        scratch_bits: 0
+    }
+  end
+
+  @doc """
+  The meaningful bytes written: the bit count rounded up to a byte.
+  Call `flush/1` first (IMPLEMENTING.md U11).
   """
   @spec data(t) :: binary
   def data(%__MODULE__{} = writer) do

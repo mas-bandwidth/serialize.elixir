@@ -190,28 +190,36 @@ defmodule Serialize.BitpackerTest do
     assert (byte &&& 0b11111000) == 0
   end
 
-  test "writing continues after flush at the bit cursor" do
-    writer =
-      BitWriter.new()
-      |> BitWriter.write_bits(0xAB, 8)
-      |> BitWriter.flush()
-      |> BitWriter.write_bits(0xCD, 8)
-      |> BitWriter.flush()
+  test "U11: every write after a flush that stored a partial word raises" do
+    for {bits, flushed} <- [
+          {8, BitWriter.new() |> BitWriter.write_bits(0xAB, 8) |> BitWriter.flush()},
+          {3, BitWriter.new() |> BitWriter.write_bits(0b101, 3) |> BitWriter.flush()},
+          {40,
+           BitWriter.new()
+           |> BitWriter.write_bits(0, 32)
+           |> BitWriter.write_bits(0, 8)
+           |> BitWriter.flush()}
+        ] do
+      assert_raise ArgumentError, fn -> BitWriter.write_bits(flushed, 0xCD, 8) end
 
-    assert BitWriter.bits_written(writer) == 16
-    assert BitWriter.data(writer) == <<0xAB, 0xCD>>
+      if rem(bits, 8) == 0 do
+        assert_raise ArgumentError, fn -> BitWriter.write_bytes(flushed, <<1>>) end
+        assert_raise ArgumentError, fn -> BitWriter.write_bytes(flushed, <<>>) end
+      else
+        assert_raise ArgumentError, fn -> BitWriter.write_align(flushed) end
+      end
+    end
   end
 
-  test "write_bytes after flush and align writes the payload" do
+  test "U11: a flush on a word boundary stores no partial word, and writing continues" do
     writer =
       BitWriter.new()
-      |> BitWriter.write_bits(0b101, 3)
+      |> BitWriter.write_bits(0xFFFFFFFF, 32)
       |> BitWriter.flush()
-      |> BitWriter.write_align()
-      |> BitWriter.write_bytes(<<1>>)
+      |> BitWriter.write_bits(0xAB, 8)
+      |> BitWriter.flush()
 
-    assert BitWriter.bits_written(writer) == 16
-    assert BitWriter.data(writer) == <<0x05, 0x01>>
+    assert BitWriter.data(writer) == <<0xFF, 0xFF, 0xFF, 0xFF, 0xAB>>
   end
 
   test "data before flush returns every written byte" do
