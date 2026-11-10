@@ -64,10 +64,16 @@ defmodule Serialize.BitpackerTest do
     assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x1FF, 8) end
     assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x10, 4) end
     assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, -1, 8) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x1_0000_0000, 32) end
 
     # the widest value of each width is accepted
-    writer = writer |> BitWriter.write_bits(0xFF, 8) |> BitWriter.write_bits(0xF, 4)
-    assert BitWriter.bits_written(writer) == 12
+    writer =
+      writer
+      |> BitWriter.write_bits(0xFF, 8)
+      |> BitWriter.write_bits(0xF, 4)
+      |> BitWriter.write_bits(0xFFFFFFFF, 32)
+
+    assert BitWriter.bits_written(writer) == 44
   end
 
   test "the reader raises on a read past the end of the data" do
