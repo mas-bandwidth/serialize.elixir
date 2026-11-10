@@ -76,6 +76,19 @@ defmodule Serialize.BitpackerTest do
     assert BitWriter.bits_written(writer) == 44
   end
 
+  test "the writer checks the field boundary at every width" do
+    for bits <- 1..32 do
+      max = (1 <<< bits) - 1
+
+      writer = BitWriter.write_bits(BitWriter.new(), max, bits)
+      assert BitWriter.bits_written(writer) == bits
+
+      assert_raise ArgumentError, fn ->
+        BitWriter.write_bits(BitWriter.new(), max + 1, bits)
+      end
+    end
+  end
+
   test "the reader raises on a read past the end of the data" do
     reader = BitReader.new(<<0xFF>>)
     assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 32) end
