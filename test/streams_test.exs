@@ -26,12 +26,20 @@ defmodule Serialize.StreamsTest do
     assert Serialize.bits_processed(reader) == 8
   end
 
-  test "an align against a truncated stream refuses" do
+  test "an aligned align at the end of a stream succeeds" do
     reader = ReadStream.new(<<0x01>>)
     {:ok, reader, _} = Serialize.serialize_bits(reader, nil, 8)
     # aligned: the zero-cost align succeeds even with nothing left
     {:ok, reader} = Serialize.serialize_align(reader)
     assert Serialize.bits_processed(reader) == 8
+  end
+
+  test "an unaligned align against a truncated stream refuses with :past_end" do
+    reader = %{ReadStream.new(<<0x01>>) | num_bits: 5}
+    {:ok, reader, 1} = Serialize.serialize_bits(reader, nil, 3)
+    {:error, reader} = Serialize.serialize_align(reader)
+    assert Serialize.refusal(reader) == :past_end
+    assert Serialize.bits_processed(reader) == 3
   end
 
   test "a failed read is terminal by convention: the error carries the stream state" do
