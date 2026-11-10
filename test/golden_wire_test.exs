@@ -90,40 +90,41 @@ defmodule Serialize.GoldenWireTest do
     assert Serialize.bits_processed(stream) == @golden_bits
   end
 
-  test "past-end poison: bytes past the stream end are never interpreted" do
-    # the reader prices its windows inside the binary, so the proof here is
-    # the contract's observable half: poison immediately past the data view
-    # (in the same underlying binary) changes nothing on the accept path.
+  test "sub-binary input decodes the accepted golden values" do
+    # The VM bounds the binary at its byte size. This run exercises
+    # sub-binary inputs cut from a longer buffer.
     clean_buffer = @golden <> :binary.copy(<<0>>, 144)
-    poison_buffer = @golden <> :binary.copy(<<0xFF>>, 144)
+    other_buffer = @golden <> :binary.copy(<<0xFF>>, 144)
 
     clean = ReadStream.new(binary_part(clean_buffer, 0, byte_size(@golden)))
-    poison = ReadStream.new(binary_part(poison_buffer, 0, byte_size(@golden)))
+    other = ReadStream.new(binary_part(other_buffer, 0, byte_size(@golden)))
 
     {:ok, clean, clean_decoded} = GoldenWire.serialize(clean, GoldenWire.zero_values())
-    {:ok, poison, poison_decoded} = GoldenWire.serialize(poison, GoldenWire.zero_values())
+    {:ok, other, other_decoded} = GoldenWire.serialize(other, GoldenWire.zero_values())
 
     assert GoldenWire.matches?(clean_decoded, GoldenWire.values())
-    assert GoldenWire.matches?(poison_decoded, GoldenWire.values())
-    assert Serialize.bits_processed(poison) == Serialize.bits_processed(clean)
+    assert GoldenWire.matches?(other_decoded, GoldenWire.values())
+    assert Serialize.bits_processed(other) == Serialize.bits_processed(clean)
   end
 
-  test "past-end poison: a truncated stream refuses identically regardless of the tail" do
+  test "truncated sub-binary input refuses at the same point" do
+    # The VM bounds the binary at its byte size. This run exercises
+    # truncated sub-binary inputs.
     truncated_bytes = byte_size(@golden) - 1
     truncated = binary_part(@golden, 0, truncated_bytes)
 
     clean_buffer = truncated <> :binary.copy(<<0>>, 145)
-    poison_buffer = truncated <> :binary.copy(<<0xFF>>, 145)
+    other_buffer = truncated <> :binary.copy(<<0xFF>>, 145)
 
     clean = ReadStream.new(binary_part(clean_buffer, 0, truncated_bytes))
-    poison = ReadStream.new(binary_part(poison_buffer, 0, truncated_bytes))
+    other = ReadStream.new(binary_part(other_buffer, 0, truncated_bytes))
 
     {:error, clean} = GoldenWire.serialize(clean, GoldenWire.zero_values())
-    {:error, poison} = GoldenWire.serialize(poison, GoldenWire.zero_values())
+    {:error, other} = GoldenWire.serialize(other, GoldenWire.zero_values())
 
     # refused at the same point, for the same reason
-    assert Serialize.bits_processed(poison) == Serialize.bits_processed(clean)
-    assert Serialize.refusal(poison) == :past_end
+    assert Serialize.bits_processed(other) == Serialize.bits_processed(clean)
+    assert Serialize.refusal(other) == :past_end
     assert Serialize.refusal(clean) == :past_end
   end
 

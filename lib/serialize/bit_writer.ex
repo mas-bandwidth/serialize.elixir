@@ -120,17 +120,24 @@ defmodule Serialize.BitWriter do
   @doc false
   @spec pack_bytes(binary, non_neg_integer, 0..31, binary) :: {binary, non_neg_integer, 0..31}
   def pack_bytes(data, scratch, scratch_bits, bytes) do
-    combined = <<scratch::little-size(scratch_bits), bytes::binary>>
-    whole_words_bytes = byte_size(combined) - rem(byte_size(combined), 4)
-    <<words::binary-size(^whole_words_bytes), tail::binary>> = combined
+    total_bytes = div(scratch_bits, 8) + byte_size(bytes)
 
-    scratch =
-      case tail do
-        <<>> -> 0
-        _ -> :binary.decode_unsigned(tail, :little)
-      end
+    if total_bytes < 4 do
+      tail = :binary.decode_unsigned(bytes, :little)
+      {data, scratch ||| tail <<< scratch_bits, total_bytes * 8}
+    else
+      head_bytes = byte_size(bytes) - rem(total_bytes, 4)
+      <<head::binary-size(^head_bytes), tail::binary>> = bytes
 
-    {<<data::binary, words::binary>>, scratch, byte_size(tail) * 8}
+      next_scratch =
+        case tail do
+          <<>> -> 0
+          _ -> :binary.decode_unsigned(tail, :little)
+        end
+
+      {<<data::binary, scratch::little-size(scratch_bits), head::binary>>, next_scratch,
+       byte_size(tail) * 8}
+    end
   end
 
   @doc """

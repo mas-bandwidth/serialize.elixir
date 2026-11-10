@@ -16,7 +16,7 @@ defmodule Serialize.BitpackerTest do
     assert BitWriter.data(writer) == <<0b10010101>>
   end
 
-  test "a value crossing the 64-bit word boundary splits low bits first" do
+  test "a value crossing the 32-bit word boundary splits low bits first" do
     # 60 zero bits, then 8 bits of 0xAB: the low nibble completes word 0,
     # the high nibble begins word 1
     writer =
@@ -201,5 +201,22 @@ defmodule Serialize.BitpackerTest do
     assert BitWriter.bytes_written(writer) == 1
     writer = BitWriter.write_bits(writer, 0x7F, 8)
     assert BitWriter.bytes_written(writer) == 2
+  end
+
+  test "byte appends preserve every scratch and payload tail length" do
+    for prefix_size <- 0..3, payload_size <- 0..33 do
+      prefix = :binary.copy(<<0xA5>>, prefix_size)
+      payload = :binary.copy(<<0xBC>>, payload_size)
+
+      writer =
+        BitWriter.new()
+        |> BitWriter.write_bytes(<<1, 2, 3, 4>>)
+        |> BitWriter.write_bytes(prefix)
+        |> BitWriter.write_bytes(payload)
+        |> BitWriter.write_bits(0xD, 4)
+
+      assert BitWriter.data(writer) == <<1, 2, 3, 4, prefix::binary, payload::binary, 0xD>>
+      assert BitWriter.bits_written(writer) == (4 + prefix_size + payload_size) * 8 + 4
+    end
   end
 end
