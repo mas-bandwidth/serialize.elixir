@@ -89,6 +89,10 @@ defmodule Serialize.BitpackerTest do
     # a reader positioned past its data cannot align
     reader = %BitReader{data: <<0>>, num_bits: 8, bits_read: 9}
     assert_raise ArgumentError, fn -> BitReader.read_align(reader) end
+
+    # also when the position is already on a byte boundary
+    reader = %BitReader{data: <<0>>, num_bits: 8, bits_read: 16}
+    assert_raise ArgumentError, fn -> BitReader.read_align(reader) end
   end
 
   test "the reader raises on a byte read past the end of the data" do
@@ -98,6 +102,11 @@ defmodule Serialize.BitpackerTest do
     assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 2) end
     assert {<<3>>, reader} = BitReader.read_bytes(reader, 1)
     assert BitReader.bits_remaining(reader) == 0
+
+    # the end is num_bits, not the size of the binary
+    reader = %BitReader{data: <<1, 2>>, num_bits: 8}
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 2) end
+    assert {<<1>>, _reader} = BitReader.read_bytes(reader, 1)
   end
 
   test "align pads with zeros to the byte boundary and is a no-op when aligned" do
