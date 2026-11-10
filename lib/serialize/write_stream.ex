@@ -7,7 +7,9 @@ defmodule Serialize.WriteStream do
   count — lives directly in this struct, so each operation allocates
   exactly one updated stream. The packing arithmetic is the 32-bit-word
   model of `Serialize.BitWriter`, carried here inline for the hot bit path
-  (the two implementations are held together by the shared golden battery);
+  (the two implementations are held together by a test in
+  `test/bitpacker_test.exs` that writes one sequence through both and
+  requires identical bytes);
   the raw-bytes append goes through `BitWriter.pack_bytes/4`, the model's
   single home for that step.
 
@@ -120,10 +122,10 @@ defmodule Serialize.WriteStream do
   # groups from least significant upward, the final group carrying the
   # remainder.
   @doc false
-  @spec serialize_integer128(t, integer, integer, integer) :: {:ok, t, integer}
-  def serialize_integer128(%__MODULE__{} = stream, value, min, max) do
+  @spec serialize_integer128(t, integer, integer, integer, String.t()) :: {:ok, t, integer}
+  def serialize_integer128(%__MODULE__{} = stream, value, min, max, operation) do
     unless is_integer(value) and value >= min and value <= max do
-      raise ArgumentError, "serialize_int128 value #{inspect(value)} outside [#{min}, #{max}]"
+      raise ArgumentError, "#{operation} value #{inspect(value)} outside [#{min}, #{max}]"
     end
 
     bits = Bits.bits_required(min, max)

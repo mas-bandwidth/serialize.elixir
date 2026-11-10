@@ -159,6 +159,22 @@ defmodule Serialize.FixedTest do
     end
   end
 
+  test "an out-of-range value raises naming serialize_fixed" do
+    for stream <- [WriteStream.new(), MeasureStream.new()] do
+      error =
+        assert_raise ArgumentError, fn ->
+          Serialize.serialize_fixed(stream, 101 <<< 8, 8, 8, -100, 100)
+        end
+
+      assert error.message =~ "serialize_fixed"
+      refute error.message =~ "serialize_int128"
+    end
+  end
+
+  test "the application does not depend on logger" do
+    refute :logger in Application.spec(:serialize, :applications)
+  end
+
   test "measure charges the exact raw-range width" do
     measure = MeasureStream.new()
     {:ok, measure, _} = Serialize.serialize_fixed(measure, 0, 8, 8, -100, 100)

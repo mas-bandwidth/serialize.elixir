@@ -3,7 +3,7 @@ defmodule Serialize.BitpackerTest do
 
   import Bitwise
 
-  alias Serialize.{BitReader, BitWriter}
+  alias Serialize.{BitReader, BitWriter, ReadStream, WriteStream}
 
   test "values pack least-significant-bit first into little-endian words" do
     # 3 bits of 0b101, then 5 bits of 0b10010: first byte = 0b10010_101
@@ -59,14 +59,73 @@ defmodule Serialize.BitpackerTest do
     assert read_back == for({value, _bits} <- fields, do: value)
   end
 
-  test "the writer masks values to the field width" do
-    writer =
-      BitWriter.new()
-      |> BitWriter.write_bits(0xFF, 4)
-      |> BitWriter.write_bits(0, 4)
-      |> BitWriter.flush()
+  test "the writer raises on a value outside the field width" do
+    writer = BitWriter.new()
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x1FF, 8) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x10, 4) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, -1, 8) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x1_0000_0000, 32) end
 
-    assert BitWriter.data(writer) == <<0x0F>>
+    # the widest value of each width is accepted
+    writer =
+      writer
+      |> BitWriter.write_bits(0xFF, 8)
+      |> BitWriter.write_bits(0xF, 4)
+      |> BitWriter.write_bits(0xFFFFFFFF, 32)
+
+    assert BitWriter.bits_written(writer) == 44
+  end
+
+  test "the writer checks the field boundary at every width" do
+    for bits <- 1..32 do
+      max = (1 <<< bits) - 1
+
+      writer = BitWriter.write_bits(BitWriter.new(), max, bits)
+      assert BitWriter.bits_written(writer) == bits
+
+      assert_raise ArgumentError, fn ->
+        BitWriter.write_bits(BitWriter.new(), max + 1, bits)
+      end
+    end
+  end
+
+  test "the reader raises on a read past the end of the data" do
+    reader = BitReader.new(<<0xFF>>)
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 32) end
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 9) end
+    assert {0xFF, reader} = BitReader.read_bits(reader, 8)
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 1) end
+    assert BitReader.bits_remaining(reader) == 0
+  end
+
+  test "the reader raises on an align past the end of the data" do
+    # 13 bits read into a 2-byte stream: the align needs 3 more bits, which fit
+    reader = BitReader.new(<<0, 0>>)
+    {0, reader} = BitReader.read_bits(reader, 13)
+    assert {:ok, reader} = BitReader.read_align(reader)
+    assert BitReader.bits_read(reader) == 16
+
+    # a reader positioned past its data cannot align
+    reader = %BitReader{data: <<0>>, num_bits: 8, bits_read: 9}
+    assert_raise ArgumentError, fn -> BitReader.read_align(reader) end
+
+    # also when the position is already on a byte boundary
+    reader = %BitReader{data: <<0>>, num_bits: 8, bits_read: 16}
+    assert_raise ArgumentError, fn -> BitReader.read_align(reader) end
+  end
+
+  test "the reader raises on a byte read past the end of the data" do
+    reader = BitReader.new(<<1, 2, 3>>)
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 4) end
+    assert {<<1, 2>>, reader} = BitReader.read_bytes(reader, 2)
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 2) end
+    assert {<<3>>, reader} = BitReader.read_bytes(reader, 1)
+    assert BitReader.bits_remaining(reader) == 0
+
+    # the end is num_bits, not the size of the binary
+    reader = %BitReader{data: <<1, 2>>, num_bits: 8}
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 2) end
+    assert {<<1>>, _reader} = BitReader.read_bytes(reader, 1)
   end
 
   test "align pads with zeros to the byte boundary and is a no-op when aligned" do
@@ -170,5 +229,134 @@ defmodule Serialize.BitpackerTest do
     assert BitWriter.bytes_written(writer) == 1
     writer = BitWriter.write_bits(writer, 0x7F, 8)
     assert BitWriter.bytes_written(writer) == 2
+  end
+
+  test "byte appends preserve every scratch and payload tail length" do
+    for prefix_size <- 0..3, payload_size <- 0..33 do
+      prefix = :binary.copy(<<0xA5>>, prefix_size)
+      payload = :binary.copy(<<0xBC>>, payload_size)
+
+      writer =
+        BitWriter.new()
+        |> BitWriter.write_bytes(<<1, 2, 3, 4>>)
+        |> BitWriter.write_bytes(prefix)
+        |> BitWriter.write_bytes(payload)
+        |> BitWriter.write_bits(0xD, 4)
+
+      assert BitWriter.data(writer) == <<1, 2, 3, 4, prefix::binary, payload::binary, 0xD>>
+      assert BitWriter.bits_written(writer) == (4 + prefix_size + payload_size) * 8 + 4
+    end
+  end
+
+  # A multi-width sequence of bits, aligns and raw bytes: every width from 1
+  # to 32 at its maximum and at an alternating pattern, with aligns and byte
+  # payloads of every tail length between them.
+  @golden_widths Enum.flat_map(1..32, fn bits ->
+                   max = (1 <<< bits) - 1
+                   [{:bits, max, bits}, {:bits, 0x55555555 &&& max, bits}]
+                 end)
+
+  @golden_sequence @golden_widths ++
+                     [
+                       :align,
+                       {:bytes, <<0xDE, 0xAD, 0xBE>>},
+                       {:bits, 0x5, 3},
+                       :align,
+                       {:bytes, <<1, 2, 3, 4, 5, 6, 7>>},
+                       {:bits, 0x1234_5678, 31},
+                       {:bits, 1, 1},
+                       :align,
+                       {:bytes, <<>>},
+                       {:bytes, <<0xC3>>},
+                       {:bits, 0xABCDE, 20}
+                     ]
+
+  defp write_through_bit_writer(ops) do
+    Enum.reduce(ops, BitWriter.new(), fn
+      {:bits, value, bits}, writer -> BitWriter.write_bits(writer, value, bits)
+      :align, writer -> BitWriter.write_align(writer)
+      {:bytes, bytes}, writer -> BitWriter.write_bytes(writer, bytes)
+    end)
+  end
+
+  defp write_through_write_stream(ops) do
+    Enum.reduce(ops, WriteStream.new(), fn
+      {:bits, value, bits}, stream ->
+        {:ok, stream, ^value} = WriteStream.serialize_bits(stream, value, bits)
+        stream
+
+      :align, stream ->
+        {:ok, stream} = WriteStream.serialize_align(stream)
+        stream
+
+      {:bytes, bytes}, stream ->
+        {:ok, stream, ^bytes} = WriteStream.serialize_bytes(stream, bytes, byte_size(bytes))
+        stream
+    end)
+  end
+
+  defp read_through_bit_reader(ops, data) do
+    {values, _reader} =
+      Enum.map_reduce(ops, BitReader.new(data), fn
+        {:bits, _value, bits}, reader ->
+          BitReader.read_bits(reader, bits)
+
+        :align, reader ->
+          {:ok, reader} = BitReader.read_align(reader)
+          {:align, reader}
+
+        {:bytes, bytes}, reader ->
+          BitReader.read_bytes(reader, byte_size(bytes))
+      end)
+
+    values
+  end
+
+  defp read_through_read_stream(ops, data) do
+    {values, _stream} =
+      Enum.map_reduce(ops, ReadStream.new(data), fn
+        {:bits, _value, bits}, stream ->
+          {:ok, stream, value} = ReadStream.serialize_bits(stream, nil, bits)
+          {value, stream}
+
+        :align, stream ->
+          {:ok, stream} = ReadStream.serialize_align(stream)
+          {:align, stream}
+
+        {:bytes, bytes}, stream ->
+          {:ok, stream, read} = ReadStream.serialize_bytes(stream, nil, byte_size(bytes))
+          {read, stream}
+      end)
+
+    values
+  end
+
+  test "BitWriter/BitReader and WriteStream/ReadStream agree on a shared sequence" do
+    # every starting bit offset within the 32-bit scratch word
+    for offset <- 0..31 do
+      prefix = if offset == 0, do: [], else: [{:bits, (1 <<< offset) - 1, offset}]
+      ops = prefix ++ @golden_sequence
+
+      writer = write_through_bit_writer(ops)
+      stream = write_through_write_stream(ops)
+
+      writer_bytes = BitWriter.data(BitWriter.flush(writer))
+      stream_bytes = WriteStream.data(WriteStream.flush(stream))
+
+      assert writer_bytes == stream_bytes, "bytes differ at offset #{offset}"
+      assert BitWriter.bits_written(writer) == WriteStream.bits_processed(stream)
+
+      expected =
+        Enum.map(ops, fn
+          {:bits, value, _bits} -> value
+          :align -> :align
+          {:bytes, bytes} -> bytes
+        end)
+
+      for data <- [writer_bytes, stream_bytes] do
+        assert read_through_bit_reader(ops, data) == expected
+        assert read_through_read_stream(ops, data) == expected
+      end
+    end
   end
 end
