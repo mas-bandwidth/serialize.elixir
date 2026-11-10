@@ -60,9 +60,12 @@ function per message covers writing, reading and measuring. Every
 operation returns `{:ok, stream, value}` or `{:error, stream}`; write
 misuse raises `ArgumentError` at the call, the port's trap, in every run,
 and never latches (IMPLEMENTING.md U9); hostile bytes refuse as
-values and never raise. A refusal is terminal — the read stream latches
-failed, and every later read on it refuses — and hands back no value at
-all. Every refusal names its rule from the standard's closed list
+values and never raise. A refusal is terminal — the read stream returned
+in `{:error, stream}` latches failed, and every later read on that
+returned stream refuses (because streams are immutable structs, callers
+must continue from the returned `stream` binding rather than reusing an
+earlier binding) — and hands back no value at all. Every refusal names
+its rule from the standard's closed list
 (`:past_end`, `:value_out_of_range`, `:nonzero_padding`, `:trailing_data`,
 `:non_finite_float`, `:invalid_utf8`, `:embedded_nul`, `:non_canonical`,
 `:rejected`), and `Serialize.refusal/1` reads the first one. A caller
