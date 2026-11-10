@@ -7,7 +7,9 @@ defmodule Serialize.WriteStream do
   count — lives directly in this struct, so each operation allocates
   exactly one updated stream. The packing arithmetic is the 32-bit-word
   model of `Serialize.BitWriter`, carried here inline for the hot bit path
-  (the two implementations are held together by the shared golden battery);
+  (the two implementations are held together by a test in
+  `test/bitpacker_test.exs` that writes one sequence through both and
+  requires identical bytes);
   the raw-bytes append goes through `BitWriter.pack_bytes/4`, the model's
   single home for that step.
 

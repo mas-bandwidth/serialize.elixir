@@ -133,9 +133,12 @@ and the caller's own bindings are untouched.
 
 A refusal is also **terminal**. Nothing after the failing operation has a
 defined position, and the stream enforces that rather than your
-discipline: a refused read latches the stream failed, and every later
-read on it returns `{:error, stream}` immediately, consuming no bits and
-decoding nothing. The latch clears only by re-initialization —
+discipline: a refused read latches the stream returned in
+`{:error, stream}` failed, and every later read on that returned stream
+returns `{:error, stream}` immediately, consuming no bits and decoding
+nothing (because streams are immutable structs, callers must continue
+from the returned `stream` binding rather than reusing an earlier
+binding). The latch clears only by re-initialization —
 `ReadStream.new/1` on a fresh buffer.
 
 ```elixir
@@ -240,7 +243,7 @@ on the narrower ones.
 
 `Serialize.Bits.bits_required/2` prices a range when designing a message
 format — one function covers the 32, 64 and 128 bit domains, on
-non-negative (unsigned-domain) bounds:
+integer bounds, including a negative minimum:
 
 ```elixir
 Serialize.Bits.bits_required(0, 200)                # 8: the cost of serialize_int over [-100, +100]

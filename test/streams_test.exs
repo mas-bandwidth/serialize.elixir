@@ -26,12 +26,20 @@ defmodule Serialize.StreamsTest do
     assert Serialize.bits_processed(reader) == 8
   end
 
-  test "an align against a truncated stream refuses" do
+  test "an aligned align at the end of a stream succeeds" do
     reader = ReadStream.new(<<0x01>>)
     {:ok, reader, _} = Serialize.serialize_bits(reader, nil, 8)
     # aligned: the zero-cost align succeeds even with nothing left
     {:ok, reader} = Serialize.serialize_align(reader)
     assert Serialize.bits_processed(reader) == 8
+  end
+
+  test "an unaligned align against a truncated stream refuses with :past_end" do
+    reader = %{ReadStream.new(<<0x01>>) | num_bits: 5}
+    {:ok, reader, 1} = Serialize.serialize_bits(reader, nil, 3)
+    {:error, reader} = Serialize.serialize_align(reader)
+    assert Serialize.refusal(reader) == :past_end
+    assert Serialize.bits_processed(reader) == 3
   end
 
   test "a failed read is terminal by convention: the error carries the stream state" do
@@ -52,7 +60,9 @@ defmodule Serialize.StreamsTest do
     copied = :binary.copy(bytes)
     assert copied == bytes
     assert :binary.referenced_byte_size(copied) == 100
+  end
 
+  test "the docs note the copy that releases a retained sub-binary" do
     {:docs_v1, _, :elixir, _, _, _, ser_docs} = Code.fetch_docs(Serialize)
 
     bytes_doc =
@@ -78,6 +88,10 @@ defmodule Serialize.StreamsTest do
     assert bytes_doc =~ ":binary.copy/1"
     assert string_doc =~ ":binary.copy/1"
     assert data_doc =~ ":binary.copy/1"
+  end
+
+  test "refusal_name returns unknown for a reason outside the closed list" do
+    assert Serialize.refusal_name(:bogus) == "unknown"
   end
 
   test "writing continues after flush at the bit cursor" do
