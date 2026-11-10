@@ -405,6 +405,12 @@ defmodule Serialize do
   or a `min` that is not finite in float32 — raise on write and measure and
   refuse as `:value_out_of_range` on read, before any bits move
   (IMPLEMENTING.md U16).
+
+  Precomputation saves only the derivation in `compressed_float_params/3`
+  (the step count, its bit width, and `delta` from the resolution). This
+  entry point takes plain numbers rather than an opaque validated token,
+  so `delta` and `min` are rounded to float32 and checked on every call;
+  callers must not assume a previously validated pair is trusted here.
   """
   @spec serialize_compressed_float_precomputed(stream, number, pos_integer, 1..32, number, number) ::
           result(float)
@@ -467,10 +473,13 @@ defmodule Serialize do
       if writing?(stream) do
         value32 = compressed_float_value32(value)
 
-        # the declaration's top decode must be finite: checked where the
+        # The declaration's top decode must be finite: checked where the
         # declaration is used to write, never on read, where the decode
-        # refuses instead
-        unless is_float(compressed_float_decode(miv, miv, delta, min32)) do
+        # refuses instead. At the top integer the decode's quotient is
+        # exactly 1.0 (a finite float32 divided by itself) and its scaled
+        # product is `delta` itself, so only the final float32 rounding
+        # of `delta + min32` can be non-finite.
+        unless is_float(Float32.round32(delta + min32)) do
           raise ArgumentError,
                 "serialize_compressed_float declaration decodes its top integer to an infinity"
         end
