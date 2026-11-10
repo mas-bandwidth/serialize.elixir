@@ -3,7 +3,8 @@
 // the family's differential pattern for a language with no native
 // coverage-guided fuzzer. From a logged seed it generates random programs, each
 // a sequence of 1 to 24 operations drawn from every operation the wire format
-// defines, ended by serialize_end as a packet reader must (STANDARD.md, end),
+// defines, the caller's own refusals and the precomputed compressed float
+// included, ended by serialize_end as a packet reader must (STANDARD.md, end),
 // and for each program:
 //
 //  1. serialize.go writes it and the Elixir port writes it (fuzz/driver.exs);
