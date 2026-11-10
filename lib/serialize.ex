@@ -262,7 +262,7 @@ defmodule Serialize do
   def serialize_int128(stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int128_min and max <= @int128_max and
              min <= max do
-    smod(stream).serialize_integer128(stream, value, min, max, "serialize_int128")
+    serialize_integer128(stream, value, min, max, "serialize_int128")
   end
 
   def serialize_int128(stream, _value, min, max),
@@ -691,7 +691,7 @@ defmodule Serialize do
   def serialize_fixed(stream, value, integer_bits, fraction_bits, min, max) do
     case fixed_params(integer_bits, fraction_bits, min, max) do
       {:ok, raw_min, raw_max} ->
-        smod(stream).serialize_integer128(stream, value, raw_min, raw_max, "serialize_fixed")
+        serialize_integer128(stream, value, raw_min, raw_max, "serialize_fixed")
 
       {:error, message} ->
         misuse(stream, message)
@@ -1037,6 +1037,14 @@ defmodule Serialize do
   defp smod(%WriteStream{}), do: WriteStream
   defp smod(%ReadStream{}), do: ReadStream
   defp smod(%MeasureStream{}), do: MeasureStream
+
+  defp serialize_integer128(%ReadStream{} = stream, value, min, max, _operation) do
+    ReadStream.serialize_integer128(stream, value, min, max)
+  end
+
+  defp serialize_integer128(stream, value, min, max, operation) do
+    smod(stream).serialize_integer128(stream, value, min, max, operation)
+  end
 
   # A refusal decided above the stream primitives — a non-finite float, an
   # out-of-range or non-finite compressed float, a malformed string, an
