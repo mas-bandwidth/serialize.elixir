@@ -3,7 +3,8 @@
 // the family's differential pattern for a language with no native
 // coverage-guided fuzzer. From a logged seed it generates random programs, each
 // a sequence of 1 to 24 operations drawn from every operation the wire format
-// defines, ended by serialize_end as a packet reader must (STANDARD.md, end),
+// defines, the caller's own refusals and the precomputed compressed float
+// included, ended by serialize_end as a packet reader must (STANDARD.md, end),
 // and for each program:
 //
 //  1. serialize.go writes it and the Elixir port writes it (fuzz/driver.exs);
@@ -68,7 +69,8 @@ const (
 var allKinds = []string{
 	"bits", "bits64", "bool", "u8", "u16", "u32", "u64", "u128",
 	"int", "int64", "i128", "fixed64", "fixed128", "intrel",
-	"float", "double", "cfloat", "bytes", "str", "align", "object", "end",
+	"float", "double", "cfloat", "cfloatpre", "bytes", "str", "align",
+	"object", "objectfail", "reject", "fail", "end",
 }
 
 type op struct {
@@ -85,7 +87,11 @@ type op struct {
 
 	ib, fb int
 
-	cfMin, cfMax, cfRes uint32
+	cfMin, cfMax, cfRes, cfDelta uint32
+	cfMiv                        uint32
+	cfBits                       int
+
+	reason string
 
 	min128, max128, val128 serialize.Int128
 	u128                   serialize.Uint128
@@ -160,6 +166,14 @@ func (o op) emit() string {
 		return fmt.Sprintf("double %016x", math.Float64bits(o.valF64))
 	case "cfloat":
 		return fmt.Sprintf("cfloat %08x %08x %08x %08x", math.Float32bits(o.valF32), o.cfMin, o.cfMax, o.cfRes)
+	case "cfloatpre":
+		return fmt.Sprintf("cfloatpre %08x %d %d %08x %08x", math.Float32bits(o.valF32), o.cfMiv, o.cfBits, o.cfDelta, o.cfMin)
+	case "reject":
+		return "reject"
+	case "fail":
+		return "fail " + o.reason
+	case "objectfail":
+		return fmt.Sprintf("objectfail %d", o.objU)
 	case "bytes":
 		return fmt.Sprintf("bytes %s %d", hexOrDot(o.payload), len(o.payload))
 	case "str":
@@ -196,6 +210,40 @@ func (o *fuzzObject) Serialize(s serialize.Stream) error {
 	}
 	o.b = b
 	return nil
+}
+
+var errObjectRefused = fmt.Errorf("fuzz: nested object refused")
+
+// failingObject is a nested object that reads or writes its uint32 and then refuses:
+// the caller's own decision, so a read stream latches rejected (or keeps a first reason
+// from the uint32 itself) while a write or measure records nothing.
+type failingObject struct {
+	u uint32
+}
+
+func (o *failingObject) Serialize(s serialize.Stream) error {
+	u := o.u
+	if s.IsReading() {
+		u = 0
+	}
+	if err := s.SerializeUint32(&u); err != nil {
+		return err
+	}
+	o.u = u
+	return errObjectRefused
+}
+
+// refusalByName is the closed refusal list, spelled as STANDARD.md spells it.
+var refusalByName = map[string]serialize.Refusal{
+	"past_end":           serialize.ErrPastEnd,
+	"value_out_of_range": serialize.ErrValueOutOfRange,
+	"nonzero_padding":    serialize.ErrNonzeroPadding,
+	"trailing_data":      serialize.ErrTrailingData,
+	"non_finite_float":   serialize.ErrNonFiniteFloat,
+	"invalid_utf8":       serialize.ErrInvalidUTF8,
+	"embedded_nul":       serialize.ErrEmbeddedNul,
+	"non_canonical":      serialize.ErrNonCanonical,
+	"rejected":           serialize.ErrRejected,
 }
 
 // int64Max is the upper bound the Go side uses for an int64 range: the declared
@@ -260,6 +308,13 @@ func (o *op) write(w *serialize.WriteStream) {
 	case "cfloat":
 		v := o.valF32
 		_ = w.SerializeCompressedFloat32(&v, f32bits(o.cfMin), f32bits(o.cfMax), f32bits(o.cfRes))
+	case "cfloatpre":
+		v := o.valF32
+		_ = w.SerializeCompressedFloat32Precomputed(&v, o.cfMiv, o.cfBits, f32bits(o.cfDelta), f32bits(o.cfMin))
+	case "reject":
+		// reject only refuses reads; a write records nothing and emits nothing
+	case "fail":
+		_ = serialize.Fail(w, refusalByName[o.reason])
 	case "bytes":
 		_ = w.SerializeBytes(o.payload)
 	case "str":
@@ -271,6 +326,9 @@ func (o *op) write(w *serialize.WriteStream) {
 		_ = w.SerializeEnd()
 	case "object":
 		_ = w.SerializeObject(&fuzzObject{u: o.objU, b: o.objB})
+	case "objectfail":
+		// the object writes its uint32, then refuses; a write stream records nothing
+		_ = w.SerializeObject(&failingObject{u: o.objU})
 	default:
 		panic("write: unknown kind " + o.kind)
 	}
@@ -383,6 +441,18 @@ func (o op) read(r *serialize.ReadStream) (bool, string) {
 			return false, ""
 		}
 		return true, fmt.Sprintf("%08x", math.Float32bits(v))
+	case "cfloatpre":
+		var v float32
+		if r.SerializeCompressedFloat32Precomputed(&v, o.cfMiv, o.cfBits, f32bits(o.cfDelta), f32bits(o.cfMin)) != nil {
+			return false, ""
+		}
+		return true, fmt.Sprintf("%08x", math.Float32bits(v))
+	case "reject":
+		_ = r.Reject()
+		return false, ""
+	case "fail":
+		_ = r.Fail(refusalByName[o.reason])
+		return false, ""
 	case "bytes":
 		buf := make([]byte, len(o.payload))
 		if r.SerializeBytes(buf) != nil {
@@ -411,6 +481,12 @@ func (o op) read(r *serialize.ReadStream) (bool, string) {
 			return false, ""
 		}
 		return true, fmt.Sprintf("%d,%s", obj.u, boolDigit(obj.b))
+	case "objectfail":
+		obj := failingObject{}
+		if r.SerializeObject(&obj) != nil {
+			return false, ""
+		}
+		return true, fmt.Sprintf("%d,-", obj.u)
 	}
 	panic("read: unknown kind " + o.kind)
 }
@@ -428,18 +504,40 @@ func expectedToken(o op) string {
 		return u128dec(o.u128)
 	case "i128", "fixed128":
 		return i128dec(o.val128)
-	case "float", "cfloat":
+	case "float", "cfloat", "cfloatpre":
 		return fmt.Sprintf("%08x", math.Float32bits(o.valF32))
 	case "double":
 		return fmt.Sprintf("%016x", math.Float64bits(o.valF64))
 	case "bytes", "str":
 		return hexOrDot(o.payload)
-	case "align", "end":
+	case "align", "end", "reject", "fail", "objectfail":
 		return "-"
 	case "object":
 		return fmt.Sprintf("%d,%s", o.objU, boolDigit(o.objB))
 	}
 	panic("expectedToken: unknown kind " + o.kind)
+}
+
+// refusalReason reports whether a clean read of the op is expected to refuse, and why.
+func (o op) refusalReason() (string, bool) {
+	switch o.kind {
+	case "reject", "objectfail":
+		return "rejected", true
+	case "fail":
+		return o.reason, true
+	}
+	return "", false
+}
+
+// firstRefusal is the index and reason of the first op a clean read is expected to
+// refuse at, or -1 when every op accepts.
+func (p program) firstRefusal() (int, string) {
+	for i, o := range p.ops {
+		if reason, ok := o.refusalReason(); ok {
+			return i, reason
+		}
+	}
+	return -1, ""
 }
 
 type program struct {
@@ -466,6 +564,99 @@ func mask(width int) uint64 {
 		return math.MaxUint64
 	}
 	return (uint64(1) << width) - 1
+}
+
+func finiteF32(f float32) bool {
+	return math.Float32bits(f)&0x7f800000 != 0x7f800000
+}
+
+// finiteF32 draws any finite float32 bit pattern: an infinity or NaN falls back
+// to the largest finite value of its sign, keeping the draw arbitrary.
+func (g *gen) finiteF32() float32 {
+	bits := g.rng.Uint32()
+	if bits&0x7f800000 == 0x7f800000 {
+		bits = (bits & 0x807fffff) | 0x7f000000
+	}
+	return math.Float32frombits(bits)
+}
+
+// cfloatDecl draws a conforming compressed-float declaration: finite min < max, a
+// positive finite resolution, and finite delta, delta/resolution and top decode, which
+// is what both writers accept. The categories run from small decimal ranges with
+// fractional resolutions to an interval whose top decode sits near FLT_MAX.
+func (g *gen) cfloatDecl() (min, max, res float32, ok bool) {
+	for tries := 0; tries < 500; tries++ {
+		switch g.rng.IntN(5) {
+		case 0:
+			min = float32(g.rangeI(-1000, 0))
+			max = float32(g.rangeI(1, 1000))
+		case 1:
+			min = -float32(g.rangeI(0, 1<<20)) / 1000
+			max = float32(g.rangeI(1, 1<<20)) / 1000
+		case 2:
+			m := math.Float32frombits(g.rng.Uint32() & 0x7effffff)
+			if !finiteF32(m) || m == 0 {
+				continue
+			}
+			min, max = -m, m
+		case 3:
+			b := math.Float32frombits(0x7f000000 | (g.rng.Uint32() & 0x007fffff))
+			if !finiteF32(b) {
+				continue
+			}
+			min, max = b/2, b
+		default:
+			min, max = g.finiteF32(), g.finiteF32()
+		}
+		if !(min < max) {
+			continue
+		}
+		delta := max - min
+		if !finiteF32(delta) || !(delta > 0) || !finiteF32(min+delta) {
+			continue
+		}
+		var k float32
+		switch g.rng.IntN(5) {
+		case 0:
+			k = float32(g.rangeI(1, 10))
+		case 1:
+			k = float32(g.rangeI(1, 1<<20))
+		case 2:
+			k = float32(g.rangeI(1<<20, 1<<30))
+		case 3:
+			k = 4294967040.0
+		default:
+			k = float32(g.rng.Uint32())
+		}
+		res = delta / k
+		if !(res > 0) || !finiteF32(res) || !finiteF32(delta/res) {
+			continue
+		}
+		return min, max, res, true
+	}
+	return -1000, 1000, 0.25, true
+}
+
+// cfloatValue draws a finite value for a declaration: arbitrary finite patterns,
+// in-range values, and values in the clamp band above and below the range.
+func (g *gen) cfloatValue(min, max float32) float32 {
+	for tries := 0; tries < 20; tries++ {
+		var v float32
+		switch g.rng.IntN(4) {
+		case 0:
+			v = g.finiteF32()
+		case 1:
+			v = min + (max-min)*float32(g.rng.Float64())
+		case 2:
+			v = max + (max-min)*float32(g.rng.Float64())
+		default:
+			v = min - (max-min)*float32(g.rng.Float64())
+		}
+		if finiteF32(v) {
+			return v
+		}
+	}
+	return min
 }
 
 // storageWidth picks one of the fixed point storage widths at least min wide.
@@ -501,7 +692,7 @@ func (g *gen) utf8Payload(bufSize int) []byte {
 func (g *gen) op() op {
 	var o op
 	rng := g.rng
-	switch rng.IntN(21) {
+	switch rng.IntN(25) {
 	case 0:
 		o.kind = "bits"
 		o.width = int(g.rangeI(1, 32))
@@ -681,14 +872,13 @@ func (g *gen) op() op {
 			bits &^= 0x0010000000000000
 		}
 		o.valF64 = math.Float64frombits(bits)
-	case 16: // compressed float32, exactly representable integers at resolution 1
+	case 16: // compressed float32: arbitrary finite values and fractional declarations
 		o.kind = "cfloat"
-		lo := int32(g.rangeI(-1000, -1))
-		hi := int32(g.rangeI(1, 1000))
-		o.cfMin = math.Float32bits(float32(lo))
-		o.cfMax = math.Float32bits(float32(hi))
-		o.cfRes = math.Float32bits(1)
-		o.valF32 = float32(g.rangeI(int64(lo), int64(hi)))
+		min, max, res, _ := g.cfloatDecl()
+		o.cfMin = math.Float32bits(min)
+		o.cfMax = math.Float32bits(max)
+		o.cfRes = math.Float32bits(res)
+		o.valF32 = g.cfloatValue(min, max)
 	case 17:
 		o.kind = "bytes"
 		o.payload = make([]byte, g.rangeI(0, 64))
@@ -701,6 +891,41 @@ func (g *gen) op() op {
 		o.payload = g.utf8Payload(o.bufSize)
 	case 19:
 		o.kind = "align"
+	case 20: // compressed float32 through the precomputed wire constants
+		o.kind = "cfloatpre"
+		min, max, res, _ := g.cfloatDecl()
+		miv, bits, delta := serialize.CompressedFloatParams(min, max, res)
+		o.cfMiv = miv
+		o.cfBits = bits
+		o.cfDelta = math.Float32bits(delta)
+		o.cfMin = math.Float32bits(min)
+		o.valF32 = g.cfloatValue(min, max)
+	case 21:
+		o.kind = "reject"
+	case 22:
+		o.kind = "fail"
+		o.reason = "past_end"
+		switch rng.IntN(9) {
+		case 0:
+			o.reason = "value_out_of_range"
+		case 1:
+			o.reason = "nonzero_padding"
+		case 2:
+			o.reason = "trailing_data"
+		case 3:
+			o.reason = "non_finite_float"
+		case 4:
+			o.reason = "invalid_utf8"
+		case 5:
+			o.reason = "embedded_nul"
+		case 6:
+			o.reason = "non_canonical"
+		case 7:
+			o.reason = "rejected"
+		}
+	case 23:
+		o.kind = "objectfail"
+		o.objU = rng.Uint32()
 	default:
 		o.kind = "object"
 		o.objU = rng.Uint32()
@@ -776,11 +1001,11 @@ func readGo(p program, data []byte) readResult {
 	res.n = len(res.tokens)
 	res.reason = "ok"
 	if err := r.Err(); err != nil {
-		refusal, isRefusal := err.(serialize.Refusal)
-		if !isRefusal {
+		name := serialize.RefusalName(err)
+		if name == "" || name == "none" {
 			panic(fmt.Sprintf("go reader latched a non-refusal error %v", err))
 		}
-		res.reason = refusal.String()
+		res.reason = name
 	}
 	return res
 }
@@ -989,18 +1214,32 @@ func (h *harness) runRound(g *gen, n int, seen map[string]bool) int {
 		if exWrite[i].measured < exWrite[i].bits {
 			h.fail(i, p, nil, "elixir measure %d bits under-measures the %d bits written", exWrite[i].measured, exWrite[i].bits)
 		}
-		// (2) cross reads: go reads elixir's bytes, elixir reads go's
+		// (2) cross reads: go reads elixir's bytes, elixir reads go's. A program
+		// with a refusal operation must stop at that step with its reason, and both
+		// sides must agree on every value decoded before it.
+		refuseAt, refuseReason := p.firstRefusal()
 		goRes := readGo(p, exWrite[i].data)
-		if goRes.reason != "ok" || goRes.n != len(p.ops) {
-			h.fail(i, p, nil, "go refused elixir's bytes at step %d (%s)", goRes.n, goRes.reason)
+		if refuseAt < 0 {
+			if goRes.reason != "ok" || goRes.n != len(p.ops) {
+				h.fail(i, p, nil, "go refused elixir's bytes at step %d (%s)", goRes.n, goRes.reason)
+			}
+		} else if goRes.reason != refuseReason || goRes.n != refuseAt {
+			h.fail(i, p, nil, "go stopped at step %d (%s), expected %d (%s)",
+				goRes.n, goRes.reason, refuseAt, refuseReason)
 		}
-		for j, o := range p.ops {
-			if o.kind != "cfloat" && goRes.tokens[j] != expectedToken(o) {
+		for j := 0; j < len(goRes.tokens); j++ {
+			o := p.ops[j]
+			if o.kind != "cfloat" && o.kind != "cfloatpre" && goRes.tokens[j] != expectedToken(o) {
 				h.fail(i, p, nil, "go decoded step %d (%s) as %s, wrote %s", j, o.kind, goRes.tokens[j], expectedToken(o))
 			}
 		}
-		if exRead[i].reason != "ok" || exRead[i].n != len(p.ops) {
-			h.fail(i, p, [][]byte{goBytes[i]}, "elixir refused go's bytes at step %d (%s)", exRead[i].n, exRead[i].reason)
+		if refuseAt < 0 {
+			if exRead[i].reason != "ok" || exRead[i].n != len(p.ops) {
+				h.fail(i, p, [][]byte{goBytes[i]}, "elixir refused go's bytes at step %d (%s)", exRead[i].n, exRead[i].reason)
+			}
+		} else if exRead[i].reason != refuseReason || exRead[i].n != refuseAt {
+			h.fail(i, p, [][]byte{goBytes[i]}, "elixir stopped at step %d (%s), expected %d (%s)",
+				exRead[i].n, exRead[i].reason, refuseAt, refuseReason)
 		}
 		if !equalStrings(exRead[i].tokens, goRes.tokens) {
 			h.fail(i, p, [][]byte{goBytes[i]}, "decoded values differ\ngo:     %q\nelixir: %q", goRes.tokens, exRead[i].tokens)
