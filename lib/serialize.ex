@@ -79,7 +79,7 @@ defmodule Serialize do
   For `bits > 32` the low 32 bits are written first as one group, then the
   high remainder as a second group (STANDARD.md "bits").
   """
-  @spec serialize_bits(stream, non_neg_integer, 1..64) :: result(non_neg_integer)
+  @spec serialize_bits(stream, non_neg_integer | nil, 1..64) :: result(non_neg_integer)
   def serialize_bits(%WriteStream{} = stream, value, bits)
       when is_integer(bits) and bits >= 1 and bits <= 32 do
     WriteStream.serialize_bits(stream, value, bits)
@@ -132,22 +132,22 @@ defmodule Serialize do
   end
 
   @doc "Serializes an unsigned 8-bit integer: `serialize_bits/3` at width 8."
-  @spec serialize_uint8(stream, non_neg_integer) :: result(non_neg_integer)
+  @spec serialize_uint8(stream, non_neg_integer | nil) :: result(non_neg_integer)
   def serialize_uint8(stream, value), do: serialize_bits(stream, value, 8)
 
   @doc "Serializes an unsigned 16-bit integer: `serialize_bits/3` at width 16."
-  @spec serialize_uint16(stream, non_neg_integer) :: result(non_neg_integer)
+  @spec serialize_uint16(stream, non_neg_integer | nil) :: result(non_neg_integer)
   def serialize_uint16(stream, value), do: serialize_bits(stream, value, 16)
 
   @doc "Serializes an unsigned 32-bit integer: `serialize_bits/3` at width 32."
-  @spec serialize_uint32(stream, non_neg_integer) :: result(non_neg_integer)
+  @spec serialize_uint32(stream, non_neg_integer | nil) :: result(non_neg_integer)
   def serialize_uint32(stream, value), do: serialize_bits(stream, value, 32)
 
   @doc """
   Serializes an unsigned 64-bit integer: `serialize_bits/3` at width 64 —
   low 32 bits then high 32. Not ranged; always costs 64 bits.
   """
-  @spec serialize_uint64(stream, non_neg_integer) :: result(non_neg_integer)
+  @spec serialize_uint64(stream, non_neg_integer | nil) :: result(non_neg_integer)
   def serialize_uint64(stream, value), do: serialize_bits(stream, value, 64)
 
   @doc """
@@ -155,7 +155,7 @@ defmodule Serialize do
   the high half, each as `serialize_bits/3` at width 64. Not ranged; always
   costs 128 bits.
   """
-  @spec serialize_uint128(stream, non_neg_integer) :: result(non_neg_integer)
+  @spec serialize_uint128(stream, non_neg_integer | nil) :: result(non_neg_integer)
   def serialize_uint128(stream, value) do
     {lo, hi} =
       if writing?(stream) do
@@ -179,7 +179,7 @@ defmodule Serialize do
   # ------------------------------------------------------------------
 
   @doc "Serializes a boolean as one bit: 1 for true, 0 for false."
-  @spec serialize_bool(stream, boolean) :: result(boolean)
+  @spec serialize_bool(stream, boolean | nil) :: result(boolean)
   def serialize_bool(%ReadStream{} = stream, _value) do
     with {:ok, stream, bit} <- ReadStream.serialize_bits(stream, 0, 1) do
       {:ok, stream, bit == 1}
@@ -204,7 +204,7 @@ defmodule Serialize do
   its offset from `min`. A degenerate range where `min == max` costs zero
   bits. The reader rejects a decoded offset outside the range.
   """
-  @spec serialize_int(stream, integer, integer, integer) :: result(integer)
+  @spec serialize_int(stream, integer | nil, integer, integer) :: result(integer)
   def serialize_int(%WriteStream{} = stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int32_min and max <= @int32_max and
              min <= max do
@@ -236,7 +236,7 @@ defmodule Serialize do
   otherwise the low 32 bits then the high remainder. Not to be confused
   with `serialize_uint64/2`, which is not ranged.
   """
-  @spec serialize_int64(stream, integer, integer, integer) :: result(integer)
+  @spec serialize_int64(stream, integer | nil, integer, integer) :: result(integer)
   def serialize_int64(stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int64_min and max <= @int64_max and
              min <= max do
@@ -258,7 +258,7 @@ defmodule Serialize do
   `min == max` costs zero bits, the writer emits nothing, the reader
   consumes nothing and takes the value from `min`, and a measure adds zero.
   """
-  @spec serialize_int128(stream, integer, integer, integer) :: result(integer)
+  @spec serialize_int128(stream, integer | nil, integer, integer) :: result(integer)
   def serialize_int128(stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int128_min and max <= @int128_max and
              min <= max do
@@ -283,7 +283,7 @@ defmodule Serialize do
   the infinities as `:non_finite_float`, and a writer handed a double that
   narrows past float32 raises.
   """
-  @spec serialize_float(stream, Float32.value()) :: result(Float32.value())
+  @spec serialize_float(stream, Float32.value() | nil) :: result(Float32.value())
   def serialize_float(%ReadStream{} = stream, _value) do
     with {:ok, stream, pattern} <- ReadStream.serialize_bits(stream, 0, 32) do
       if not Float32.finite32?(pattern) do
@@ -308,7 +308,7 @@ defmodule Serialize do
   the reader tests the raw bits and refuses NaN and the infinities as
   `:non_finite_float`.
   """
-  @spec serialize_double(stream, Float32.value()) :: result(Float32.value())
+  @spec serialize_double(stream, Float32.value() | nil) :: result(Float32.value())
   def serialize_double(%ReadStream{} = stream, _value) do
     with {:ok, stream, pattern} <- serialize_bits(stream, 0, 64) do
       if not Float32.finite64?(pattern) do
@@ -686,7 +686,7 @@ defmodule Serialize do
   offset above the raw range refused. The round trip is exact. A raw value
   outside the raw bounds is caller error and raises.
   """
-  @spec serialize_fixed(stream, integer, pos_integer, non_neg_integer, integer, integer) ::
+  @spec serialize_fixed(stream, integer | nil, pos_integer, non_neg_integer, integer, integer) ::
           result(integer)
   def serialize_fixed(stream, value, integer_bits, fraction_bits, min, max) do
     case fixed_params(integer_bits, fraction_bits, min, max) do

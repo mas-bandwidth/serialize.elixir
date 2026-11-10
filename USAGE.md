@@ -240,7 +240,7 @@ on the narrower ones.
 
 `Serialize.Bits.bits_required/2` prices a range when designing a message
 format — one function covers the 32, 64 and 128 bit domains, on
-non-negative (unsigned-domain) bounds:
+integer bounds, including a negative minimum:
 
 ```elixir
 Serialize.Bits.bits_required(0, 200)                # 8: the cost of serialize_int over [-100, +100]
