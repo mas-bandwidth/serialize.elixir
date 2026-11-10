@@ -12,8 +12,8 @@ defmodule Serialize.BitReader do
   leaves the BEAM's small-integer range. Reads share the underlying binary;
   nothing is copied.
 
-  The reader trusts its callers to check `would_read_past_end?/2` before
-  reading, exactly as the reference's streams do.
+  Callers check `would_read_past_end?/2` before reading, exactly as the
+  reference's streams do; a read past the end raises `ArgumentError`.
 
   The reference's public `BitReader` (IMPLEMENTING.md U15). `decode_bits/3`
   is internal, shared with `Serialize.ReadStream`: `@doc false`, no promise.
@@ -43,11 +43,16 @@ defmodule Serialize.BitReader do
 
   @doc """
   Reads `bits` bits, where `bits` is in `[1, 32]`, returning the value and
-  the advanced reader. The caller has already checked the bounds.
+  the advanced reader. Raises `ArgumentError` when the read would pass the
+  end of the data.
   """
   @spec read_bits(t, 1..32) :: {non_neg_integer, t}
   def read_bits(%__MODULE__{} = reader, bits)
       when is_integer(bits) and bits >= 1 and bits <= 32 do
+    if would_read_past_end?(reader, bits) do
+      raise ArgumentError, "reading #{bits} bits would pass the end of the data"
+    end
+
     {decode_bits(reader.data, reader.bits_read, bits),
      %{reader | bits_read: reader.bits_read + bits}}
   end
@@ -78,10 +83,15 @@ defmodule Serialize.BitReader do
   @doc """
   Reads an align: skips ahead to the next byte boundary, verifying the
   padding bits are zero. Returns `{:error, reader}` when they are not —
-  the padding bits are consumed either way, as in the reference.
+  the padding bits are consumed either way, as in the reference. Raises
+  `ArgumentError` when the padding would pass the end of the data.
   """
   @spec read_align(t) :: {:ok, t} | {:error, t}
   def read_align(%__MODULE__{} = reader) do
+    if would_read_past_end?(reader, align_bits(reader)) do
+      raise ArgumentError, "aligning would pass the end of the data"
+    end
+
     case rem(reader.bits_read, 8) do
       0 ->
         {:ok, reader}
@@ -97,13 +107,18 @@ defmodule Serialize.BitReader do
   @doc """
   Reads `count` raw bytes at a byte-aligned position via `binary_part/3`
   (a sub-binary of the data when over 64 bytes; use `:binary.copy/1` if
-  retaining beyond the packet lifetime). The caller has aligned and checked
-  the bounds.
+  retaining beyond the packet lifetime). The caller has aligned. Raises
+  `ArgumentError` when the read would pass the end of the data.
   """
   @spec read_bytes(t, non_neg_integer) :: {binary, t}
   def read_bytes(%__MODULE__{} = reader, count)
       when is_integer(count) and count >= 0 do
     0 = rem(reader.bits_read, 8)
+
+    if would_read_past_end?(reader, count * 8) do
+      raise ArgumentError, "reading #{count} bytes would pass the end of the data"
+    end
+
     bytes = binary_part(reader.data, reader.bits_read >>> 3, count)
     {bytes, %{reader | bits_read: reader.bits_read + count * 8}}
   end
