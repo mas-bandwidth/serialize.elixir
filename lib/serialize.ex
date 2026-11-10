@@ -262,7 +262,7 @@ defmodule Serialize do
   def serialize_int128(stream, value, min, max)
       when is_integer(min) and is_integer(max) and min >= @int128_min and max <= @int128_max and
              min <= max do
-    smod(stream).serialize_integer128(stream, value, min, max)
+    smod(stream).serialize_integer128(stream, value, min, max, "serialize_int128")
   end
 
   def serialize_int128(stream, _value, min, max),
@@ -691,12 +691,7 @@ defmodule Serialize do
   def serialize_fixed(stream, value, integer_bits, fraction_bits, min, max) do
     case fixed_params(integer_bits, fraction_bits, min, max) do
       {:ok, raw_min, raw_max} ->
-        unless reading?(stream) or (is_integer(value) and value >= raw_min and value <= raw_max) do
-          raise ArgumentError,
-                "serialize_fixed value #{inspect(value)} outside [#{raw_min}, #{raw_max}]"
-        end
-
-        smod(stream).serialize_integer128(stream, value, raw_min, raw_max)
+        smod(stream).serialize_integer128(stream, value, raw_min, raw_max, "serialize_fixed")
 
       {:error, message} ->
         misuse(stream, message)
