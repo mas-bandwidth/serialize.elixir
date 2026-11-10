@@ -37,16 +37,18 @@ defmodule Serialize.BitWriter do
   def new, do: %__MODULE__{}
 
   @doc """
-  Writes the low `bits` bits of `value`, where `bits` is in `[1, 32]`.
+  Writes `value` in `bits` bits, where `bits` is in `[1, 32]`.
 
-  The value is masked to the field width, so bits above the width can never
-  corrupt neighboring fields; a caller passing an over-wide value is
-  violating the trusted-writes contract either way.
+  Raises `ArgumentError` when `value` is negative or does not fit in
+  `bits` bits.
   """
   @spec write_bits(t, non_neg_integer, 1..32) :: t
   def write_bits(%__MODULE__{} = writer, value, bits)
-      when is_integer(value) and value >= 0 and is_integer(bits) and bits >= 1 and bits <= 32 do
-    value = value &&& (1 <<< bits) - 1
+      when is_integer(value) and is_integer(bits) and bits >= 1 and bits <= 32 do
+    if value < 0 or value > (1 <<< bits) - 1 do
+      raise ArgumentError, "value #{value} does not fit in #{bits} bits"
+    end
+
     scratch_bits = writer.scratch_bits + bits
 
     if scratch_bits >= 32 do

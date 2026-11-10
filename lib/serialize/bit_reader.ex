@@ -43,11 +43,16 @@ defmodule Serialize.BitReader do
 
   @doc """
   Reads `bits` bits, where `bits` is in `[1, 32]`, returning the value and
-  the advanced reader. The caller has already checked the bounds.
+  the advanced reader. Raises `ArgumentError` when the read would pass the
+  end of the data.
   """
   @spec read_bits(t, 1..32) :: {non_neg_integer, t}
   def read_bits(%__MODULE__{} = reader, bits)
       when is_integer(bits) and bits >= 1 and bits <= 32 do
+    if would_read_past_end?(reader, bits) do
+      raise ArgumentError, "reading #{bits} bits would pass the end of the data"
+    end
+
     {decode_bits(reader.data, reader.bits_read, bits),
      %{reader | bits_read: reader.bits_read + bits}}
   end
@@ -78,7 +83,8 @@ defmodule Serialize.BitReader do
   @doc """
   Reads an align: skips ahead to the next byte boundary, verifying the
   padding bits are zero. Returns `{:error, reader}` when they are not —
-  the padding bits are consumed either way, as in the reference.
+  the padding bits are consumed either way, as in the reference. Raises
+  `ArgumentError` when the padding would pass the end of the data.
   """
   @spec read_align(t) :: {:ok, t} | {:error, t}
   def read_align(%__MODULE__{} = reader) do
