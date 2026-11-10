@@ -59,14 +59,45 @@ defmodule Serialize.BitpackerTest do
     assert read_back == for({value, _bits} <- fields, do: value)
   end
 
-  test "the writer masks values to the field width" do
-    writer =
-      BitWriter.new()
-      |> BitWriter.write_bits(0xFF, 4)
-      |> BitWriter.write_bits(0, 4)
-      |> BitWriter.flush()
+  test "the writer raises on a value outside the field width" do
+    writer = BitWriter.new()
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x1FF, 8) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, 0x10, 4) end
+    assert_raise ArgumentError, fn -> BitWriter.write_bits(writer, -1, 8) end
 
-    assert BitWriter.data(writer) == <<0x0F>>
+    # the widest value of each width is accepted
+    writer = writer |> BitWriter.write_bits(0xFF, 8) |> BitWriter.write_bits(0xF, 4)
+    assert BitWriter.bits_written(writer) == 12
+  end
+
+  test "the reader raises on a read past the end of the data" do
+    reader = BitReader.new(<<0xFF>>)
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 32) end
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 9) end
+    assert {0xFF, reader} = BitReader.read_bits(reader, 8)
+    assert_raise ArgumentError, fn -> BitReader.read_bits(reader, 1) end
+    assert BitReader.bits_remaining(reader) == 0
+  end
+
+  test "the reader raises on an align past the end of the data" do
+    # 13 bits read into a 2-byte stream: the align needs 3 more bits, which fit
+    reader = BitReader.new(<<0, 0>>)
+    {0, reader} = BitReader.read_bits(reader, 13)
+    assert {:ok, reader} = BitReader.read_align(reader)
+    assert BitReader.bits_read(reader) == 16
+
+    # a reader positioned past its data cannot align
+    reader = %BitReader{data: <<0>>, num_bits: 8, bits_read: 9}
+    assert_raise ArgumentError, fn -> BitReader.read_align(reader) end
+  end
+
+  test "the reader raises on a byte read past the end of the data" do
+    reader = BitReader.new(<<1, 2, 3>>)
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 4) end
+    assert {<<1, 2>>, reader} = BitReader.read_bytes(reader, 2)
+    assert_raise ArgumentError, fn -> BitReader.read_bytes(reader, 2) end
+    assert {<<3>>, reader} = BitReader.read_bytes(reader, 1)
+    assert BitReader.bits_remaining(reader) == 0
   end
 
   test "align pads with zeros to the byte boundary and is a no-op when aligned" do
