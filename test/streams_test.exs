@@ -1,6 +1,8 @@
 defmodule Serialize.StreamsTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Serialize.{ReadStream, WriteStream}
 
   test "bits and bytes processed track the cursor on both sides" do
@@ -94,21 +96,38 @@ defmodule Serialize.StreamsTest do
     assert Serialize.refusal_name(:bogus) == "unknown"
   end
 
-  test "writing continues after flush at the bit cursor" do
-    {:ok, writer, _} = Serialize.serialize_uint8(WriteStream.new(), 0xAB)
-    writer = WriteStream.flush(writer)
-    {:ok, writer, _} = Serialize.serialize_uint8(writer, 0xCD)
-    writer = WriteStream.flush(writer)
-    assert Serialize.bits_processed(writer) == 16
-    assert WriteStream.data(writer) == <<0xAB, 0xCD>>
+  test "U11: every write after a flush that stored a partial word raises" do
+    writes = [
+      fn s -> Serialize.serialize_bits(s, 0xCD, 8) end,
+      fn s -> Serialize.serialize_bits(s, 0, 64) end,
+      fn s -> Serialize.serialize_uint8(s, 0xCD) end,
+      fn s -> Serialize.serialize_bool(s, true) end,
+      fn s -> Serialize.serialize_int(s, 5, 0, 10) end,
+      fn s -> Serialize.serialize_int64(s, 5, 0, 1 <<< 40) end,
+      fn s -> Serialize.serialize_int128(s, 5, 0, 1 <<< 100) end,
+      fn s -> Serialize.serialize_int_relative(s, 1, 2) end,
+      fn s -> Serialize.serialize_float(s, 1.5) end,
+      fn s -> Serialize.serialize_double(s, 1.5) end,
+      fn s -> Serialize.serialize_compressed_float(s, 1.0, 0.0, 10.0, 0.01) end,
+      fn s -> Serialize.serialize_string(s, "", 16) end,
+      fn s -> Serialize.serialize_bytes(s, <<1>>, 1) end,
+      fn s -> Serialize.serialize_bytes(s, <<>>, 0) end
+    ]
+
+    for {value, bits} <- [{0xAB, 8}, {0b101, 3}], write <- writes do
+      {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), value, bits)
+      flushed = WriteStream.flush(writer)
+      assert_raise ArgumentError, fn -> write.(flushed) end
+    end
+
+    {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), 0b101, 3)
+    assert_raise ArgumentError, fn -> Serialize.serialize_align(WriteStream.flush(writer)) end
   end
 
-  test "serialize_bytes after flush aligns and writes the payload" do
-    {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), 0b101, 3)
-    writer = WriteStream.flush(writer)
-    assert {:ok, writer, <<1>>} = Serialize.serialize_bytes(writer, <<1>>, 1)
-    assert Serialize.bits_processed(writer) == 16
-    assert WriteStream.data(writer) == <<0x05, 0x01>>
+  test "U11: a flush on a word boundary stores no partial word, and writing continues" do
+    {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), 0xFFFFFFFF, 32)
+    {:ok, writer, _} = Serialize.serialize_uint8(WriteStream.flush(writer), 0xAB)
+    assert WriteStream.data(WriteStream.flush(writer)) == <<0xFF, 0xFF, 0xFF, 0xFF, 0xAB>>
   end
 
   test "data before flush returns every processed byte" do

@@ -178,7 +178,9 @@ reason as the family does (`"none"` for no refusal), and
 choosing (anything outside the closed list latches `:rejected`).
 
 `WriteStream.flush/1` is required before `WriteStream.data/1`: the
-buffer is unspecified until then. Streams are immutable values, so there
+buffer is unspecified until then. Flush ends the write: a write after a
+flush that stored a partial word raises `ArgumentError` (IMPLEMENTING.md
+U11). Streams are immutable values, so there
 is no re-initialization: start a fresh one with `new`.
 
 ```elixir
