@@ -20,6 +20,12 @@ copy of the specification in
 vendored here beside the implementation and held to the upstream text by
 a CI check. serialize.elixir 2.x implements **format version 2.0**.
 
+If you would rather not write serialize functions by hand,
+[Schema](https://github.com/mas-bandwidth/schema) generates them for Elixir
+and many other languages from one definition of your data. The code it
+generates for Elixir carries its own bit reader and writer, so it does not
+need this library.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
