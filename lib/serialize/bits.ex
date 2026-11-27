@@ -22,7 +22,7 @@ defmodule Serialize.Bits do
   integers, so ranges wider than the signed domain (the reference's
   unsigned-domain subtraction) are exact rather than overflowing.
   """
-  @spec bits_required(non_neg_integer, non_neg_integer) :: non_neg_integer
+  @spec bits_required(integer, integer) :: non_neg_integer
   def bits_required(min, max) when is_integer(min) and is_integer(max) and min <= max do
     bit_length(max - min)
   end

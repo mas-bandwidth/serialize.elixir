@@ -100,8 +100,8 @@ defmodule Serialize.FuzzDriver do
 
   defp run([line | rest], {:write, w, m}, out) do
     [kind | args] = String.split(line, " ")
-    {:ok, w, _value} = op(kind, w, args, false)
-    {:ok, m, _value} = op(kind, m, args, false)
+    w = write_op(kind, w, args)
+    m = write_op(kind, m, args)
     run(rest, {:write, w, m}, out)
   end
 
@@ -174,6 +174,16 @@ defmodule Serialize.FuzzDriver do
   defp sentinel_bin(%ReadStream{}, true, _data), do: <<0xA5, 0xA5, 0xA5, 0xA5>>
   defp sentinel_bin(_s, _alt, data), do: unhex(data)
 
+  # A write or measure stream records nothing, so an operation that refuses returns
+  # {:error, stream}: the stream carries on unchanged (or with the bytes it already
+  # wrote or measured, as a failing nested object does).
+  defp write_op(kind, s, args) do
+    case op(kind, s, args, false) do
+      {:ok, s, _value} -> s
+      {:error, s} -> s
+    end
+  end
+
   # Each op returns {:ok, stream, value} or {:error, stream}; align and end,
   # which carry no value, report "-".
   defp op("bits", s, [v, w], alt),
@@ -193,6 +203,35 @@ defmodule Serialize.FuzzDriver do
 
   defp op("u32", s, [v], alt),
     do: Serialize.serialize_uint32(s, sentinel_int(s, alt, v))
+
+  defp op("cfloatpre", s, [v, miv, bits, delta, min], alt),
+    do:
+      Serialize.serialize_compressed_float_precomputed(
+        s,
+        sentinel_f32(s, alt, v),
+        int(miv),
+        int(bits),
+        f32(delta),
+        f32(min)
+      )
+
+  # reject is read only: on a write or measure stream the program records nothing.
+  defp op("reject", %ReadStream{} = s, [], _alt), do: no_value(Serialize.serialize_reject(s))
+  defp op("reject", s, [], _alt), do: {:ok, s, :none}
+
+  defp op("fail", s, [reason], _alt),
+    do: no_value(Serialize.serialize_fail(s, String.to_atom(reason)))
+
+  # A nested object that reads or writes its uint32 and then refuses: on read
+  # serialize_object latches the caller's refusal; on write or measure it returns the
+  # error and the stream carries on.
+  defp op("objectfail", s, [u], alt) do
+    Serialize.serialize_object(s, fn stream ->
+      with {:ok, stream, _} <- Serialize.serialize_uint32(stream, sentinel_int(stream, alt, u)) do
+        {:error, stream}
+      end
+    end)
+  end
 
   defp op("u64", s, [v], alt),
     do: Serialize.serialize_uint64(s, sentinel_int(s, alt, v))
@@ -254,7 +293,7 @@ defmodule Serialize.FuzzDriver do
   defp no_value({:ok, s}), do: {:ok, s, :none}
   defp no_value({:error, s}), do: {:error, s}
 
-  defp token(kind, v) when kind in ["float", "cfloat"], do: hex32(Float32.bits32(v))
+  defp token(kind, v) when kind in ["float", "cfloat", "cfloatpre"], do: hex32(Float32.bits32(v))
   defp token("double", v), do: Float32.bits64(v) |> Integer.to_string(16) |> pad(16)
   defp token("bool", v), do: if(v, do: "1", else: "0")
   defp token(kind, v) when kind in ["bytes", "str"], do: hex(v)

@@ -127,7 +127,9 @@ jobs:
             exit 1
           fi
           head -n 20 /tmp/fuzz-hostile-control.txt
-          grep -q 'mutation disagreement on' /tmp/fuzz-hostile-control.txt
+          # the sabotage reports terminality:<reason>; whichever check sees it first
+          # (a clean refusal program or a mutation) must name it
+          grep -q 'terminality:' /tmp/fuzz-hostile-control.txt
           echo "negative control: the differential went red on hostile-read terminality sabotage"
       - name: Upload failing inputs
         if: failure()
@@ -241,7 +243,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-latest
     env:
-      SERIALIZE_TAG: v2.1.1
+      SERIALIZE_TAG: v2.1.4
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1

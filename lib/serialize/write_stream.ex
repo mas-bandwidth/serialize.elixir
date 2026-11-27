@@ -7,7 +7,9 @@ defmodule Serialize.WriteStream do
   count — lives directly in this struct, so each operation allocates
   exactly one updated stream. The packing arithmetic is the 32-bit-word
   model of `Serialize.BitWriter`, carried here inline for the hot bit path
-  (the two implementations are held together by the shared golden battery);
+  (the two implementations are held together by a test in
+  `test/bitpacker_test.exs` that writes one sequence through both and
+  requires identical bytes);
   the raw-bytes append goes through `BitWriter.pack_bytes/4`, the model's
   single home for that step.
 
@@ -46,6 +48,7 @@ defmodule Serialize.WriteStream do
   # every intermediate stays a small integer — producing the one allocation
   # the operation costs.
   defp write_bits_flat(stream, value, bits) do
+    BitWriter.check_not_flushed(stream.scratch_bits, stream.bits_written)
     scratch_bits = stream.scratch_bits + bits
 
     if scratch_bits >= 32 do
@@ -120,10 +123,10 @@ defmodule Serialize.WriteStream do
   # groups from least significant upward, the final group carrying the
   # remainder.
   @doc false
-  @spec serialize_integer128(t, integer, integer, integer) :: {:ok, t, integer}
-  def serialize_integer128(%__MODULE__{} = stream, value, min, max) do
+  @spec serialize_integer128(t, integer, integer, integer, String.t()) :: {:ok, t, integer}
+  def serialize_integer128(%__MODULE__{} = stream, value, min, max, operation) do
     unless is_integer(value) and value >= min and value <= max do
-      raise ArgumentError, "serialize_int128 value #{inspect(value)} outside [#{min}, #{max}]"
+      raise ArgumentError, "#{operation} value #{inspect(value)} outside [#{min}, #{max}]"
     end
 
     bits = Bits.bits_required(min, max)
@@ -162,6 +165,7 @@ defmodule Serialize.WriteStream do
     end
 
     {:ok, stream} = serialize_align(stream)
+    BitWriter.check_not_flushed(stream.scratch_bits, stream.bits_written)
 
     {out, scratch, scratch_bits} =
       BitWriter.pack_bytes(stream.data, stream.scratch, stream.scratch_bits, data)
@@ -199,7 +203,11 @@ defmodule Serialize.WriteStream do
   @spec align_bits(t) :: 0..7
   def align_bits(%__MODULE__{} = stream), do: rem(8 - rem(stream.bits_written, 8), 8)
 
-  @doc "Flushes the final partial word. Call before `data/1`."
+  @doc """
+  Flushes the final partial word. Required before `data/1`, and it ends
+  the write: any write after a flush that stored a partial word raises
+  `ArgumentError` (IMPLEMENTING.md U11).
+  """
   @spec flush(t) :: t
   def flush(%__MODULE__{scratch_bits: 0} = stream), do: stream
 
@@ -212,10 +220,26 @@ defmodule Serialize.WriteStream do
     }
   end
 
-  @doc "The bytes written. Call `flush/1` first."
+  @doc """
+  The bytes written. Call `flush/1` first (IMPLEMENTING.md U11).
+
+  When the underlying buffer exceeds 64 bytes, the returned slice is a
+  sub-binary referencing the stream's append buffer; pass it through
+  `:binary.copy/1` if retaining it long-term.
+  """
   @spec data(t) :: binary
   def data(%__MODULE__{} = stream) do
-    binary_part(stream.data, 0, min(byte_size(stream.data), bytes_processed(stream)))
+    partial_bytes = div(stream.scratch_bits + 7, 8)
+
+    partial =
+      if partial_bytes == 0 do
+        <<>>
+      else
+        binary_part(<<stream.scratch::little-32>>, 0, partial_bytes)
+      end
+
+    full = <<stream.data::binary, partial::binary>>
+    binary_part(full, 0, min(byte_size(full), bytes_processed(stream)))
   end
 
   @doc "The number of bits written so far."

@@ -231,6 +231,63 @@ defmodule Serialize.CompressedFloatTest do
     end
   end
 
+  test "precomputed constants produce the same bytes as the declaration form" do
+    for {min, max, res} <- [{0.0, 10.0, 0.01}, {-100.0, 100.0, 0.01}, {0.0, 16_777_215.0, 1.0}],
+        value <- [min, 0.0, max, max + 1.0] do
+      {:ok, {miv, bits, delta}} = Serialize.compressed_float_params(min, max, res)
+
+      {:ok, declared, _} =
+        Serialize.serialize_compressed_float(WriteStream.new(), value, min, max, res)
+
+      {:ok, precomputed, _} =
+        Serialize.serialize_compressed_float_precomputed(
+          WriteStream.new(),
+          value,
+          miv,
+          bits,
+          delta,
+          min
+        )
+
+      assert WriteStream.data(WriteStream.flush(precomputed)) ==
+               WriteStream.data(WriteStream.flush(declared))
+
+      assert Serialize.bits_processed(precomputed) == Serialize.bits_processed(declared)
+    end
+  end
+
+  test "precomputed constants raise on write when the top of the range is not finite" do
+    {:ok, {miv, bits, delta}} = Serialize.compressed_float_params(@top_min, @top_max, @top_res)
+
+    for stream <- [WriteStream.new(), MeasureStream.new()] do
+      assert_raise ArgumentError, fn ->
+        Serialize.serialize_compressed_float_precomputed(
+          stream,
+          @top_min,
+          miv,
+          bits,
+          delta,
+          @top_min
+        )
+      end
+    end
+
+    {:ok, writer, _} = Serialize.serialize_bits(WriteStream.new(), miv, bits)
+    data = WriteStream.data(WriteStream.flush(writer))
+
+    {:error, reader} =
+      Serialize.serialize_compressed_float_precomputed(
+        ReadStream.new(data),
+        nil,
+        miv,
+        bits,
+        delta,
+        @top_min
+      )
+
+    assert Serialize.refusal(reader) == :non_finite_float
+  end
+
   test "measure charges the exact field width" do
     measure = MeasureStream.new()
     {:ok, measure, _} = Serialize.serialize_compressed_float(measure, 5.0, 0.0, 10.0, 0.01)

@@ -57,10 +57,10 @@ defmodule Serialize.MeasureStream do
   # Internal, no promise (IMPLEMENTING.md U15).
   # Charges the exact width of a ranged 128-bit integer.
   @doc false
-  @spec serialize_integer128(t, integer, integer, integer) :: {:ok, t, integer}
-  def serialize_integer128(%__MODULE__{} = stream, value, min, max) do
+  @spec serialize_integer128(t, integer, integer, integer, String.t()) :: {:ok, t, integer}
+  def serialize_integer128(%__MODULE__{} = stream, value, min, max, operation) do
     unless is_integer(value) and value >= min and value <= max do
-      raise ArgumentError, "serialize_int128 value #{inspect(value)} outside [#{min}, #{max}]"
+      raise ArgumentError, "#{operation} value #{inspect(value)} outside [#{min}, #{max}]"
     end
 
     {:ok, add(stream, Bits.bits_required(min, max)), value}

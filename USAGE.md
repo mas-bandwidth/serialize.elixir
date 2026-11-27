@@ -133,9 +133,12 @@ and the caller's own bindings are untouched.
 
 A refusal is also **terminal**. Nothing after the failing operation has a
 defined position, and the stream enforces that rather than your
-discipline: a refused read latches the stream failed, and every later
-read on it returns `{:error, stream}` immediately, consuming no bits and
-decoding nothing. The latch clears only by re-initialization —
+discipline: a refused read latches the stream returned in
+`{:error, stream}` failed, and every later read on that returned stream
+returns `{:error, stream}` immediately, consuming no bits and decoding
+nothing (because streams are immutable structs, callers must continue
+from the returned `stream` binding rather than reusing an earlier
+binding). The latch clears only by re-initialization —
 `ReadStream.new/1` on a fresh buffer.
 
 ```elixir
@@ -175,7 +178,9 @@ reason as the family does (`"none"` for no refusal), and
 choosing (anything outside the closed list latches `:rejected`).
 
 `WriteStream.flush/1` is required before `WriteStream.data/1`: the
-buffer is unspecified until then. Streams are immutable values, so there
+buffer is unspecified until then. Flush ends the write: a write after a
+flush that stored a partial word raises `ArgumentError` (IMPLEMENTING.md
+U11). Streams are immutable values, so there
 is no re-initialization: start a fresh one with `new`.
 
 ```elixir
@@ -240,7 +245,7 @@ on the narrower ones.
 
 `Serialize.Bits.bits_required/2` prices a range when designing a message
 format — one function covers the 32, 64 and 128 bit domains, on
-non-negative (unsigned-domain) bounds:
+integer bounds, including a negative minimum:
 
 ```elixir
 Serialize.Bits.bits_required(0, 200)                # 8: the cost of serialize_int over [-100, +100]
@@ -337,8 +342,11 @@ the same wire:
 `serialize_bytes/3` aligns to the byte boundary (the alignment is part
 of the format, padding verified on read) and then bulk-copies `count`
 bytes. The count is never transmitted: both sides agree on it. On read,
-the data argument is ignored and the bytes come back as a sub-binary of
-the stream's data — no copy.
+the data argument is ignored and the bytes come back via `binary_part/3`:
+on the BEAM, slices over 64 bytes are sub-binaries referencing the
+stream's data (while smaller slices are copied), so callers retaining
+read bytes or strings beyond the packet lifetime should pass them through
+`:binary.copy/1`.
 
 ```elixir
 {:ok, stream, _} = Serialize.serialize_bytes(stream, <<0xDE, 0xAD, 0xBE, 0xEF>>, 4)

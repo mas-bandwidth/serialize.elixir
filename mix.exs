@@ -4,7 +4,7 @@ defmodule Serialize.MixProject do
   def project do
     [
       app: :serialize,
-      version: "2.1.1",
+      version: "2.1.2",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -19,7 +19,7 @@ defmodule Serialize.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: []
     ]
   end
 

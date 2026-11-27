@@ -1,6 +1,6 @@
 name: nightly conformance
 
-# A functional test, nightly on the fleet: this port against the CURRENT C/C++
+# A functional test, nightly on self-hosted runners: this port against the CURRENT C/C++
 # data. ci.yml checks the vendored corpus against upstream on every push and
 # drives the corpus through the C++ reader at the family pin; this job checks
 # the port against mas-bandwidth/serialize main as it stands tonight.
@@ -31,7 +31,7 @@ on:
 jobs:
   conformance:
     name: the port against mas-bandwidth/serialize main
-    # THE FORK GUARD: this repository is PUBLIC and these are the fleet's runners.
+    # THE FORK GUARD: this repository is PUBLIC and these runners are self-hosted.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, nightly]
     timeout-minutes: 30
